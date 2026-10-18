@@ -44,6 +44,7 @@ mod imp {
 
     #[link(name = "kernel32")]
     extern "system" {
+        fn WaitForSingleObject(h: *mut c_void, ms: u32) -> u32;
         fn CreateProcessW(
             app: *const u16,
             cmdline: *mut u16,
@@ -116,6 +117,9 @@ mod imp {
                 let e = std::io::Error::last_os_error();
                 return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
+            // 厂商 login.exe 拉起游戏后不会退出；游戏会校验父进程仍在。
+            // 因此这里等待游戏结束，而不是立刻让启动器退出。
+            WaitForSingleObject(pi.h_process, 0xFFFF_FFFF);
             CloseHandle(pi.h_thread);
             CloseHandle(pi.h_process);
         }
