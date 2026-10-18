@@ -13,6 +13,8 @@ pub mod http;
 pub mod launch;
 pub mod manifest;
 pub mod update;
+#[cfg(windows)]
+pub mod ui;
 
 pub use config::Config;
 pub use manifest::{Entry, Manifest};

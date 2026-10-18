@@ -1,116 +1,184 @@
-//! l1j-launcher（控制台版）—— 先跑通流程，之后再套 UI
+//! l1j-launcher —— 客户端更新器
 //!
-//! 用法：
-//!   l1j-launcher.exe                 检查更新 → 合并 → 启动游戏
-//!   l1j-launcher.exe --no-launch     只更新，不启动（自测用）
-//!   l1j-launcher.exe --force         忽略版本号，强制比对（默认就会比对，本参数仅保留语义）
+//! 默认：原生更新窗口（与客户端 `skin\Bulletin.bmp` 同款）
+//! `--console`：控制台模式（自测/排错）
 
 use l1j_launcher::{config::Config, launch, update};
+#[cfg(windows)]
+use l1j_launcher::ui::{self, Phase, UiState};
 use l1pak::Container;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    if let Err(e) = run() {
-        eprintln!("[错误] {}", e);
-        std::process::exit(1);
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        eprintln!("取程序路径失败: {}", e);
+        std::process::exit(1)
+    });
+    let dir = exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let cfg_path = dir.join("launcher.json");
+    if !cfg_path.exists() {
+        let _ = l1j_launcher::config::write_example(&cfg_path);
+        eprintln!("未找到 launcher.json，已生成示例：{}", cfg_path.display());
+        std::process::exit(2);
+    }
+    let cfg = Config::load(&cfg_path).unwrap_or_else(|e| {
+        eprintln!("{}", e);
+        std::process::exit(2)
+    });
+    let client = cfg.client_path(&dir);
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--console") {
+        console_flow(&cfg, &client);
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        let state: ui::Shared = std::sync::Arc::new(std::sync::Mutex::new(UiState::default()));
+        let st = state.clone();
+        let cfg2 = cfg.clone();
+        let client2 = client.clone();
+        std::thread::spawn(move || worker(cfg2, client2, st));
+        let rc = ui::run(state);
+        if ui::start_clicked() {
+            let _ = launch::launch_game(&client, &cfg.game_exe);
+        }
+        std::process::exit(rc);
+    }
+    #[cfg(not(windows))]
+    console_flow(&cfg, &client);
+}
+
+#[cfg(windows)]
+fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
+    let set = |phase: Phase, cur: f32, ovr: f32, msg: String| {
+        {
+            let mut s = state.lock().unwrap();
+            s.phase = phase;
+            s.current = cur;
+            s.overall = ovr;
+            s.status = msg;
+        }
+        ui::notify();
+    };
+
+    set(Phase::Working, 0.0, 0.0, "正在檢查更新…".into());
+    if ui::canceled() {
+        return;
+    }
+
+    let manifest = match update::fetch_and_verify(&cfg.update_base, &cfg.public_key) {
+        Ok(m) => m,
+        Err(e) => {
+            set(Phase::Failed, 0.0, 0.0, format!("更新失敗：{}", trim(&e, 32)));
+            return;
+        }
+    };
+    if manifest.entries.is_empty() {
+        set(Phase::Done, 1.0, 1.0, "已是最新版本".into());
+        return;
+    }
+
+    let mut container = match Container::load(&client) {
+        Ok(c) => c,
+        Err(e) => {
+            set(Phase::Failed, 0.0, 0.0, format!("讀取客戶端失敗：{}", trim(&e, 26)));
+            return;
+        }
+    };
+    let plan = update::plan(&manifest, &container);
+    if plan.to_download.is_empty() {
+        let _ = update::write_local_version(&client, &plan.version, &[]);
+        set(Phase::Done, 1.0, 1.0, format!("已是最新（{}）", plan.version));
+        return;
+    }
+
+    let res = update::apply(
+        &cfg.update_base,
+        &client,
+        &mut container,
+        &plan,
+        &mut |_desc, i, n| {
+            let p = if n == 0 { 0.0 } else { (i as f32) / (n as f32) };
+            set(Phase::Working, 0.0, p, "正在下載更新…".into());
+        },
+    );
+
+    match res {
+        Ok(_) => {
+            let names: Vec<String> = plan.to_download.iter().map(|e| e.name.clone()).collect();
+            let _ = update::write_local_version(&client, &plan.version, &names);
+            set(Phase::Done, 1.0, 1.0, format!("更新完成（{}）", plan.version));
+        }
+        Err(e) => set(Phase::Failed, 0.0, 0.0, format!("更新失敗：{}", trim(&e, 32))),
     }
 }
 
-fn run() -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("取程序路径失败: {}", e))?;
-    let dir = exe
-        .parent()
-        .ok_or("无法确定程序所在目录")?
-        .to_path_buf();
-
-    let cfg_path = dir.join("launcher.json");
-    if !cfg_path.exists() {
-        l1j_launcher::config::write_example(&cfg_path).map_err(|e| format!("写示例配置失败: {}", e))?;
-        return Err(format!(
-            "未找到 launcher.json，已生成示例：{}\n请填写 update_base 与 public_key 后重试",
-            cfg_path.display()
-        ));
+fn trim(s: &str, n: usize) -> String {
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i >= n {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
     }
-    let cfg = Config::load(&cfg_path)?;
-    let client = cfg.client_path(&dir);
-    if !client.exists() {
-        return Err(format!("客户端目录不存在: {}", client.display()));
-    }
+    out.replace('\n', " ")
+}
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let no_launch = args.iter().any(|a| a == "--no-launch");
-
-    // 1) 拉清单 + 验签
+fn console_flow(cfg: &Config, client: &Path) {
     let manifest = match update::fetch_and_verify(&cfg.update_base, &cfg.public_key) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("[更新] 取清单失败: {}", e);
             if cfg.launch_on_error {
-                eprintln!("[更新] 按配置跳过更新，直接启动游戏");
-                return launch::launch_game(&client, &cfg.game_exe);
+                let _ = launch::launch_game(client, &cfg.game_exe);
             }
-            return Err(e);
+            return;
         }
     };
-
-    let local_ver = update::read_local_version(&client)
-        .map(|v| v.version)
-        .unwrap_or_else(|| "(无)".to_string());
-    println!("客户端: {}", client.display());
-    println!("本地版本: {}   远端版本: {}", local_ver, manifest.version);
-    if manifest.entries.is_empty() {
-        println!("清单里没有条目，跳过。");
-        return if no_launch {
-            Ok(())
-        } else {
-            launch::launch_game(&client, &cfg.game_exe)
-        };
-    }
-
-    // 2) 比对
-    let mut container = Container::load(&client)?;
-    let plan = update::plan(&manifest, &container);
+    println!(
+        "本地版本: {:?}   远端: {}",
+        update::read_local_version(client).map(|v| v.version),
+        manifest.version
+    );
+    let mut c = match Container::load(client) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{}", e);
+            return;
+        }
+    };
+    let plan = update::plan(&manifest, &c);
     println!(
         "条目 {} 条：需下载 {}，已是最新 {}",
         manifest.entries.len(),
         plan.to_download.len(),
         plan.skipped
     );
-
     if plan.to_download.is_empty() {
-        update::write_local_version(&client, &plan.version, &[])?;
-        println!("已是最新，无需更新。");
-    } else {
-        // 3) 下载 + 校验 + 合并
-        let report = update::apply(
-            &cfg.update_base,
-            &client,
-            &mut container,
-            &plan,
-            &mut |desc, i, n| {
-                if i < n {
-                    println!("  [{}/{}] {}", i + 1, n, desc)
-                } else {
-                    println!("  {}", desc)
-                }
-            },
-        )?;
-        println!(
-            "合并完成：原地写 {} 条，尾部追加 {} 条；pak {} → {} B（+{}），index {}",
-            report.inplace.len(),
-            report.appended.len(),
-            report.pak_old,
-            report.pak_new,
-            report.bytes_appended,
-            if report.idx_changed { "已更新" } else { "未变" }
-        );
-        let names: Vec<String> = plan.to_download.iter().map(|e| e.name.clone()).collect();
-        update::write_local_version(&client, &plan.version, &names)?;
+        let _ = update::write_local_version(client, &plan.version, &[]);
+        println!("已是最新。");
+        return;
     }
-
-    if no_launch {
-        println!("--no-launch：不启动游戏。");
-        return Ok(());
+    match update::apply(&cfg.update_base, client, &mut c, &plan, &mut |d, i, n| {
+        println!("  [{}/{}] {}", i + 1, n, d)
+    }) {
+        Ok(rep) => {
+            println!(
+                "合并完成：原地写 {} 条，追加 {} 条；pak {} → {} B",
+                rep.inplace.len(),
+                rep.appended.len(),
+                rep.pak_old,
+                rep.pak_new
+            );
+            let names: Vec<String> = plan.to_download.iter().map(|e| e.name.clone()).collect();
+            let _ = update::write_local_version(client, &plan.version, &names);
+        }
+        Err(e) => eprintln!("更新失败: {}", e),
     }
-    println!("启动 {} ...", cfg.game_exe);
-    launch::launch_game(&client, &cfg.game_exe)
 }
