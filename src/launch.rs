@@ -12,44 +12,112 @@ mod imp {
     use std::ffi::c_void;
     use std::path::Path;
 
-    #[link(name = "shell32")]
+    #[repr(C)]
+    struct STARTUPINFOW {
+        cb: u32,
+        lp_reserved: *mut u16,
+        lp_desktop: *mut u16,
+        lp_title: *mut u16,
+        dw_x: u32,
+        dw_y: u32,
+        dw_x_size: u32,
+        dw_y_size: u32,
+        dw_x_count_chars: u32,
+        dw_y_count_chars: u32,
+        dw_fill_attribute: u32,
+        dw_flags: u32,
+        w_show_window: u16,
+        cb_reserved2: u16,
+        lp_reserved2: *mut u8,
+        h_std_input: *mut c_void,
+        h_std_output: *mut c_void,
+        h_std_error: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct PROCESS_INFORMATION {
+        h_process: *mut c_void,
+        h_thread: *mut c_void,
+        dw_process_id: u32,
+        dw_thread_id: u32,
+    }
+
+    #[link(name = "kernel32")]
     extern "system" {
-        fn ShellExecuteW(
-            hwnd: *mut c_void,
-            lp_operation: *const u16,
-            lp_file: *const u16,
-            lp_parameters: *const u16,
-            lp_directory: *const u16,
-            n_show_cmd: i32,
-        ) -> isize;
+        fn CreateProcessW(
+            app: *const u16,
+            cmdline: *mut u16,
+            sa: *mut c_void,
+            ta: *mut c_void,
+            inherit: i32,
+            flags: u32,
+            env: *mut c_void,
+            cwd: *const u16,
+            si: *const STARTUPINFOW,
+            pi: *mut PROCESS_INFORMATION,
+        ) -> i32;
+        fn CloseHandle(h: *mut c_void) -> i32;
     }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
+    /// 直接 CreateProcess：启动器自身已提权，子进程继承管理员令牌。
+    /// 不能用 ShellExecute("runas")——`.bin` 没有文件关联，会报“没有应用程序与该文件有关联”。
     pub fn run(client: &Path, exe_name: &str, args: &str) -> Result<(), String> {
         let exe = client.join(exe_name);
         if !exe.is_file() {
             return Err(format!("找不到游戏程序: {}", exe.display()));
         }
-        let op = wide("runas");
-        let file = wide(&exe.to_string_lossy());
-        let params = wide(args);
-        let dir = wide(&client.to_string_lossy());
+        let app = wide(&exe.to_string_lossy());
+        let mut cmd = wide(&format!("\"{}\" {}", exe.display(), args));
+        let cwd = wide(&client.to_string_lossy());
+        let si = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            lp_reserved: std::ptr::null_mut(),
+            lp_desktop: std::ptr::null_mut(),
+            lp_title: std::ptr::null_mut(),
+            dw_x: 0,
+            dw_y: 0,
+            dw_x_size: 0,
+            dw_y_size: 0,
+            dw_x_count_chars: 0,
+            dw_y_count_chars: 0,
+            dw_fill_attribute: 0,
+            dw_flags: 0,
+            w_show_window: 1,
+            cb_reserved2: 0,
+            lp_reserved2: std::ptr::null_mut(),
+            h_std_input: std::ptr::null_mut(),
+            h_std_output: std::ptr::null_mut(),
+            h_std_error: std::ptr::null_mut(),
+        };
+        let mut pi = PROCESS_INFORMATION {
+            h_process: std::ptr::null_mut(),
+            h_thread: std::ptr::null_mut(),
+            dw_process_id: 0,
+            dw_thread_id: 0,
+        };
         unsafe {
-            let r = ShellExecuteW(
+            let ok = CreateProcessW(
+                app.as_ptr(),
+                cmd.as_mut_ptr(),
                 std::ptr::null_mut(),
-                op.as_ptr(),
-                file.as_ptr(),
-                params.as_ptr(),
-                dir.as_ptr(),
-                1,
+                std::ptr::null_mut(),
+                0,
+                0,
+                std::ptr::null_mut(),
+                cwd.as_ptr(),
+                &si,
+                &mut pi,
             );
-            // ShellExecuteW 返回值 > 32 表示成功
-            if r as usize <= 32 {
-                return Err(format!("启动失败（ShellExecute 返回 {}）", r));
+            if ok == 0 {
+                let e = std::io::Error::last_os_error();
+                return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
+            CloseHandle(pi.h_thread);
+            CloseHandle(pi.h_process);
         }
         Ok(())
     }

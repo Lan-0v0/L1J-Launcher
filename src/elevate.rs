@@ -60,6 +60,7 @@ fn is_elevated() -> bool {
 #[cfg(windows)]
 fn relaunch_as_admin() {
     use std::ffi::c_void;
+    #[link(name = "shell32")]
     extern "system" {
         fn ShellExecuteW(
             hwnd: *mut c_void,
