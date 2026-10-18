@@ -46,8 +46,8 @@ impl Config {
 pub fn write_example(path: &Path) -> std::io::Result<()> {
     let sample = Config {
         update_base: "https://your-domain/l1update/".into(),
-        game_exe: "TW13032701.bin".into(),
-        server_ip: Some("124.222.172.24".into()),
+        game_exe: "login.exe".into(),
+        server_ip: None,
         client_dir: ".".into(),
         public_key: "00".repeat(32),
         launch_on_error: true,
