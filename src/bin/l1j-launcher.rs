@@ -91,6 +91,10 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
             return;
         }
     };
+    if let Err(e) = update::verify_container(&container) {
+        set(Phase::Failed, 0.0, 0.0, format!("客戶端校驗失敗：{}", trim(&e, 24)));
+        return;
+    }
     let plan = update::plan(&manifest, &container);
     if plan.to_download.is_empty() {
         let _ = update::write_local_version(&client, &plan.version, &[]);

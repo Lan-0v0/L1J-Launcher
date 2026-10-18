@@ -137,6 +137,12 @@ pub fn apply(
         patches.insert(e.name.clone(), data);
     }
 
+    // 合并前备份上一版容器（单槽，失败可回滚）
+    let bdir = client.join("backup_l1j");
+    let _ = std::fs::create_dir_all(&bdir);
+    let _ = std::fs::copy(client.join("Text.pak"), bdir.join("Text.pak.bak"));
+    let _ = std::fs::copy(client.join("Text.idx"), bdir.join("Text.idx.bak"));
+
     progress("合并到 Text.pak", total, total);
     let rep = c.replace(&patches)?;
     c.save(client)
@@ -212,5 +218,33 @@ mod tests {
         assert_eq!(p.to_download.len(), 1);
         assert_eq!(p.to_download[0].name, "b.html");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// 回滚到上一次更新的容器（backup_l1j/）
+pub fn rollback(client: &Path) -> Result<(), String> {
+    let bdir = client.join("backup_l1j");
+    for n in ["Text.pak", "Text.idx"] {
+        let src = bdir.join(format!("{}.bak", n));
+        if !src.is_file() {
+            return Err(format!("没有备份：{}", src.display()));
+        }
+        std::fs::copy(&src, client.join(n)).map_err(|e| format!("回滚 {} 失败: {}", n, e))?;
+    }
+    Ok(())
+}
+
+/// 容器完整性检查（首次启动 / 排查 QQ 传输损坏）
+pub fn verify_container(c: &Container) -> Result<usize, String> {
+    let mut bad = 0usize;
+    for e in &c.entries {
+        if e.off < 0 || (e.off as usize).saturating_add(e.size.max(0) as usize) > c.pak.len() {
+            bad += 1;
+        }
+    }
+    if bad > 0 {
+        Err(format!("容器有 {} 个条目越界，可能文件损坏", bad))
+    } else {
+        Ok(c.entries.len())
     }
 }
