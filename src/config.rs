@@ -61,11 +61,18 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
         server_ip: None,
         client_dir: ".".into(),
         public_key: "00".repeat(32),
-        servers: vec![ServerCfg {
-            name: "龍潭天堂".into(),
-            ip: "124.222.172.24".into(),
-            enabled: true,
-        }],
+        servers: vec![
+            ServerCfg {
+                name: "龙潭天堂·一区".into(),
+                ip: "124.222.172.24".into(),
+                enabled: false, // 维护中
+            },
+            ServerCfg {
+                name: "龙潭天堂·测试服".into(),
+                ip: "124.222.172.24".into(),
+                enabled: true,
+            },
+        ],
         launch_on_error: true,
     };
     std::fs::write(path, serde_json::to_string_pretty(&sample).unwrap())
