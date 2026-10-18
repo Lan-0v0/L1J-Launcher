@@ -1,0 +1,52 @@
+//! 启动器配置（`launcher.json`，与 exe 同目录）
+
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// 更新站根地址，必须以 / 结尾，例如 "https://example.com/l1update/"
+    pub update_base: String,
+    /// 更新完成后要启动的程序（相对客户端目录）
+    pub game_exe: String,
+    /// 客户端目录（相对 exe 所在目录；"." 表示同目录）
+    #[serde(default = "default_client_dir")]
+    pub client_dir: String,
+    /// Ed25519 公钥（32 字节 hex，64 个字符）
+    pub public_key: String,
+    /// 拉不到清单时是否仍然直接启动游戏（默认 true，避免服务器挂了玩家进不去）
+    #[serde(default = "default_true")]
+    pub launch_on_error: bool,
+}
+
+fn default_client_dir() -> String {
+    ".".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let txt = std::fs::read_to_string(path)
+            .map_err(|e| format!("读配置失败 {}: {}", path.display(), e))?;
+        serde_json::from_str(&txt).map_err(|e| format!("配置格式错误: {}", e))
+    }
+
+    pub fn client_path(&self, exe_dir: &Path) -> PathBuf {
+        exe_dir.join(&self.client_dir)
+    }
+}
+
+/// 写入示例配置（首次运行时放置）
+pub fn write_example(path: &Path) -> std::io::Result<()> {
+    let sample = Config {
+        update_base: "https://your-domain/l1update/".into(),
+        game_exe: "login_old.exe".into(),
+        client_dir: ".".into(),
+        public_key: "00".repeat(32),
+        launch_on_error: true,
+    };
+    std::fs::write(path, serde_json::to_string_pretty(&sample).unwrap())
+}

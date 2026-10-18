@@ -1,0 +1,24 @@
+[package]
+name = "l1pak"
+version = "0.1.0"
+edition = "2021"
+description = "天堂1 客户端 Text.pak / Text.idx 容器读写（纯 Rust，无第三方运行时）"
+license = "MIT"
+
+[lib]
+doctest = false
+
+[dependencies]
+sha2 = "0.10"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = "symbols"
+codegen-units = 1
