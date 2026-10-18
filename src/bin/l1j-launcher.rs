@@ -47,7 +47,7 @@ fn main() {
         std::thread::spawn(move || worker(cfg2, client2, st));
         let rc = ui::run(state);
         if ui::start_clicked() {
-            let _ = launch::launch_game(&client, &cfg.game_exe);
+            let _ = do_launch(&cfg, &client);
         }
         std::process::exit(rc);
     }
@@ -124,6 +124,16 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
     }
 }
 
+/// 按配置启动：有 server_ip 就带十进制整数参数（路线乙：直拉游戏）
+fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
+    match cfg.server_ip.as_deref() {
+        Some(ip) if !ip.trim().is_empty() => {
+            launch::launch_game_with_ip(client, &cfg.game_exe, ip.trim())
+        }
+        _ => launch::launch_game(client, &cfg.game_exe),
+    }
+}
+
 fn trim(s: &str, n: usize) -> String {
     let mut out = String::new();
     for (i, ch) in s.chars().enumerate() {
@@ -142,7 +152,7 @@ fn console_flow(cfg: &Config, client: &Path) {
         Err(e) => {
             eprintln!("[更新] 取清单失败: {}", e);
             if cfg.launch_on_error {
-                let _ = launch::launch_game(client, &cfg.game_exe);
+                let _ = do_launch(cfg, client);
             }
             return;
         }

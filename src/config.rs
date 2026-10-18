@@ -9,6 +9,9 @@ pub struct Config {
     pub update_base: String,
     /// 更新完成后要启动的程序（相对客户端目录）
     pub game_exe: String,
+    /// 游戏服务器 IPv4；填了就按登录器的方式传十进制整数给游戏（路线乙）
+    #[serde(default)]
+    pub server_ip: Option<String>,
     /// 客户端目录（相对 exe 所在目录；"." 表示同目录）
     #[serde(default = "default_client_dir")]
     pub client_dir: String,
@@ -43,7 +46,8 @@ impl Config {
 pub fn write_example(path: &Path) -> std::io::Result<()> {
     let sample = Config {
         update_base: "https://your-domain/l1update/".into(),
-        game_exe: "login_old.exe".into(),
+        game_exe: "TW13032701.bin".into(),
+        server_ip: Some("124.222.172.24".into()),
         client_dir: ".".into(),
         public_key: "00".repeat(32),
         launch_on_error: true,
