@@ -22,6 +22,7 @@ const BAR2_Y: i32 = 424;
 const STATUS_RECT: (i32, i32, i32, i32) = (176, 386, 560, 404);
 const BTN_START: (i32, i32, i32, i32) = (569, 366, 666, 413);
 const BTN_CANCEL: (i32, i32, i32, i32) = (569, 414, 666, 447);
+const BTN_CLOSE: (i32, i32, i32, i32) = (670, 2, 692, 24); // 皮肤右上角那个小 X
 
 const BLUE: [(u8, u8, u8); 8] = [
     (165, 215, 239), (107, 162, 231), (107, 162, 231), (49, 109, 198),
@@ -370,7 +371,10 @@ mod imp {
             WM_LBUTTONDOWN => {
                 let x = (lp & 0xFFFF) as i32;
                 let y = ((lp >> 16) & 0xFFFF) as i32;
-                if hit(BTN_CANCEL, x, y) {
+                if hit(BTN_CLOSE, x, y) {
+                    CANCELED.store(true, Ordering::Relaxed);
+                    PostQuitMessage(0);
+                } else if hit(BTN_CANCEL, x, y) {
                     CANCELED.store(true, Ordering::Relaxed);
                     PostQuitMessage(0);
                 } else if hit(BTN_START, x, y) {
