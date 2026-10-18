@@ -9,6 +9,7 @@
 //!   3. 清单用 Ed25519 签名，防更新服务器被篡改
 
 pub mod config;
+pub mod elevate;
 pub mod http;
 pub mod launch;
 pub mod manifest;

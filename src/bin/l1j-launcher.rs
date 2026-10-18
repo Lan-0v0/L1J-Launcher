@@ -11,6 +11,7 @@ use l1pak::Container;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    l1j_launcher::elevate::ensure_admin();
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         eprintln!("取程序路径失败: {}", e);
         std::process::exit(1)
