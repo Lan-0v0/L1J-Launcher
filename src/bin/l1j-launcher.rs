@@ -11,7 +11,8 @@ use l1pak::Container;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // 更新阶段不提权（最小权限 + 降低误报特征）：只在拉起游戏时 ShellExecute(runas)
+    // 决策：与同行一致——启动即提权，只弹一次 UAC（后续如要改回最小权限，删掉这行即可）
+    l1j_launcher::elevate::ensure_admin();
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         eprintln!("取程序路径失败: {}", e);
         std::process::exit(1)
