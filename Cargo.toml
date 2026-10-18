@@ -8,6 +8,7 @@ license = "MIT"
 [lib]
 name = "l1j_launcher"
 path = "src/lib.rs"
+doctest = false
 
 [[bin]]
 name = "l1j-launcher"
