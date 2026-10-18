@@ -119,6 +119,7 @@ extern "system" {
                      xs: i32, ys: i32, ws: i32, hs: i32,
                      bits: *const c_void, bi: *const BITMAPINFOHEADER, usage: u32, rop: u32) -> i32;
     fn Ellipse(dc: *mut c_void, l: i32, t: i32, r: i32, b: i32) -> i32;
+    fn GetStockObject(obj: i32) -> *mut c_void;
 }
 
 #[link(name = "kernel32")]
@@ -217,17 +218,28 @@ unsafe fn draw_img(hdc: *mut c_void, img: &Img, x: i32, y: i32) {
                   img.bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
 }
 
-unsafe fn dot(hdc: *mut c_void, cx: i32, cy: i32, on: bool) {
-    let br = CreateSolidBrush(if on { rgb(60, 200, 70) } else { rgb(110, 110, 110) });
-    let old = SelectObject(hdc, br);
-    Ellipse(hdc, cx - 6, cy - 6, cx + 6, cy + 6);
-    SelectObject(hdc, old);
+unsafe fn fill_circle(hdc: *mut c_void, cx: i32, cy: i32, r: i32, color: u32) {
+    let br = CreateSolidBrush(color);
+    let old_b = SelectObject(hdc, br);
+    let null_pen = GetStockObject(8); // NULL_PEN
+    let old_p = SelectObject(hdc, null_pen);
+    Ellipse(hdc, cx - r, cy - r, cx + r, cy + r);
+    SelectObject(hdc, old_p);
+    SelectObject(hdc, old_b);
     DeleteObject(br);
-    let hl = CreateSolidBrush(rgb(200, 255, 190));
-    let old2 = SelectObject(hdc, hl);
-    Ellipse(hdc, cx - 3, cy - 3, cx - 1, cy - 1);
-    SelectObject(hdc, old2);
-    DeleteObject(hl);
+}
+
+/// 状态圆点：暗边 -> 亮色主体 -> 左上高光（直径 16px，真正的圆形）
+unsafe fn dot(hdc: *mut c_void, cx: i32, cy: i32, on: bool) {
+    if on {
+        fill_circle(hdc, cx, cy, 8, rgb(24, 96, 38));
+        fill_circle(hdc, cx, cy, 7, rgb(74, 226, 96));
+        fill_circle(hdc, cx - 2, cy - 2, 2, rgb(224, 255, 214));
+    } else {
+        fill_circle(hdc, cx, cy, 8, rgb(58, 54, 50));
+        fill_circle(hdc, cx, cy, 7, rgb(132, 128, 122));
+        fill_circle(hdc, cx - 2, cy - 2, 2, rgb(180, 176, 170));
+    }
 }
 
 unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize) -> isize {
@@ -251,10 +263,14 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     let mut name: Vec<u16> = srv.name.encode_utf16().collect();
                     name.push(0);
                     SelectObject(hdc, font);
-                    SetTextColor(hdc, if srv.enabled { rgb(245, 238, 220) } else { rgb(150, 140, 120) });
+                    SetTextColor(hdc, rgb(12, 9, 6));
+                    let mut sh = RECT { left: rc.left + 1, top: rc.top + 1, right: rc.right + 1, bottom: rc.bottom + 1 };
+                    DrawTextW(hdc, name.as_ptr(), (name.len() - 1) as i32, &mut sh,
+                              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                    SetTextColor(hdc, if srv.enabled { rgb(255, 252, 238) } else { rgb(168, 162, 150) });
                     DrawTextW(hdc, name.as_ptr(), (name.len() - 1) as i32, &mut rc,
                               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                    let cx = if n <= 1 { x - 14 } else if i % 2 == 0 { x - 14 } else { x + PLATE_W + 14 };
+                    let cx = if n <= 1 { x - 16 } else if i % 2 == 0 { x - 16 } else { x + PLATE_W + 16 };
                     dot(hdc, cx, y + PLATE_H / 2, srv.enabled);
                 }
             }
