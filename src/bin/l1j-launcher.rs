@@ -1,3 +1,4 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! l1j-launcher —— 客户端更新器
 //!
 //! 默认：原生更新窗口（与客户端 `skin\Bulletin.bmp` 同款）

@@ -19,7 +19,7 @@ const BAR_X: i32 = 105;
 const BAR_W: i32 = 366;
 const BAR1_Y: i32 = 407;
 const BAR2_Y: i32 = 424;
-const STATUS_RECT: (i32, i32, i32, i32) = (106, 386, 472, 404);
+const STATUS_RECT: (i32, i32, i32, i32) = (176, 386, 560, 404);
 const BTN_START: (i32, i32, i32, i32) = (569, 366, 666, 413);
 const BTN_CANCEL: (i32, i32, i32, i32) = (569, 414, 666, 447);
 
@@ -233,6 +233,7 @@ mod imp {
         pub w: i32,
         pub h: i32,
         pub bits: Vec<u8>, // BGRA，自顶向下
+        pub dim: Vec<u8>,  // 50% 暗化副本（禁用态）
     }
 
     pub fn parse_bg() -> Bg {
@@ -255,7 +256,12 @@ mod imp {
                 bits[dst + 3] = 255;
             }
         }
-        Bg { w, h, bits }
+        let dim = bits
+            .iter()
+            .map(|v| (v / 2) as u8)
+            .collect::<Vec<u8>>();
+        let _ = &mut bits;
+        Bg { w, h, bits, dim }
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -320,19 +326,23 @@ mod imp {
                   DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     }
 
-    unsafe fn disable_start(hdc: *mut c_void) {
-        // 50% 点阵黑（8x8 棋盘），盖在“開始”上
-        let mut pat = [0u8; 8];
-        for (i, b) in pat.iter_mut().enumerate() {
-            *b = if i % 2 == 0 { 0b1010_1010 } else { 0b0101_0101 };
-        }
-        let bmp = CreateBitmap(8, 8, 1, 1, pat.as_ptr() as *const c_void);
-        let br = CreatePatternBrush(bmp);
-        let (l, t, r, b) = BTN_START;
-        let rc = RECT { left: l, top: t, right: r, bottom: b };
-        FillRect(hdc, &rc, br);
-        DeleteObject(br);
-        DeleteObject(bmp);
+    unsafe fn dim_rect(hdc: *mut c_void, bg: &Bg, r: (i32, i32, i32, i32)) {
+        let (l, t, rr, b) = r;
+        let bi = BITMAPINFOHEADER {
+            bi_size: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            bi_width: bg.w,
+            bi_height: -bg.h,
+            bi_planes: 1,
+            bi_bit_count: 32,
+            bi_compression: BI_RGB,
+            bi_size_image: 0,
+            bi_x_pels: 0,
+            bi_y_pels: 0,
+            bi_clr_used: 0,
+            bi_clr_important: 0,
+        };
+        StretchDIBits(hdc, l, t, rr - l, b - t, l, t, rr - l, b - t,
+                      bg.dim.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
     }
 
     unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize) -> isize {
@@ -348,7 +358,7 @@ mod imp {
                 draw_bar(hdc, BAR1_Y, st.current, &BLUE, false);
                 draw_bar(hdc, BAR2_Y, st.overall, &RED, false);
                 if dim {
-                    disable_start(hdc);
+                    dim_rect(hdc, &bg, BTN_START);
                 }
 
                 let font = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 5, 0,
@@ -422,7 +432,7 @@ mod imp {
         let x = (sw - W) / 2;
         let y = (sh - H) / 2;
 
-        let hwnd = CreateWindowExW(0, cls.as_ptr(), title.as_ptr(), WS_POPUP | WS_SYSMENU,
+        let hwnd = CreateWindowExW(0, cls.as_ptr(), title.as_ptr(), WS_POPUP,
                                    x, y, W, H, std::ptr::null_mut(), std::ptr::null_mut(),
                                    inst, std::ptr::null_mut());
         if hwnd.is_null() {
