@@ -15,6 +15,8 @@ pub mod launch;
 pub mod manifest;
 pub mod update;
 #[cfg(windows)]
+pub mod select;
+#[cfg(windows)]
 pub mod ui;
 
 pub use config::Config;

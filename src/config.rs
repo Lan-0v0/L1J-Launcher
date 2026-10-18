@@ -4,6 +4,14 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerCfg {
+    pub name: String,
+    pub ip: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     /// 更新站根地址，必须以 / 结尾，例如 "https://example.com/l1update/"
     pub update_base: String,
@@ -17,6 +25,9 @@ pub struct Config {
     pub client_dir: String,
     /// Ed25519 公钥（32 字节 hex，64 个字符）
     pub public_key: String,
+    /// 区服列表（>=2 个时启动前弹选区窗口）
+    #[serde(default)]
+    pub servers: Vec<ServerCfg>,
     /// 拉不到清单时是否仍然直接启动游戏（默认 true，避免服务器挂了玩家进不去）
     #[serde(default = "default_true")]
     pub launch_on_error: bool,
@@ -50,6 +61,11 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
         server_ip: None,
         client_dir: ".".into(),
         public_key: "00".repeat(32),
+        servers: vec![ServerCfg {
+            name: "龍潭天堂".into(),
+            ip: "124.222.172.24".into(),
+            enabled: true,
+        }],
         launch_on_error: true,
     };
     std::fs::write(path, serde_json::to_string_pretty(&sample).unwrap())

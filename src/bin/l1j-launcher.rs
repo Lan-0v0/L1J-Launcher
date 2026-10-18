@@ -125,8 +125,26 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
     }
 }
 
-/// 按配置启动：有 server_ip 就带十进制整数参数（路线乙：直拉游戏）
+/// 启动：先选服（>=2 个时才弹窗），再按 IP 十进制参数拉起游戏
 fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if !cfg.servers.is_empty() {
+            let list: Vec<l1j_launcher::select::Server> = cfg
+                .servers
+                .iter()
+                .map(|s| l1j_launcher::select::Server {
+                    name: s.name.clone(),
+                    ip: s.ip.clone(),
+                    enabled: s.enabled,
+                })
+                .collect();
+            return match l1j_launcher::select::select(list) {
+                Some(i) => launch::launch_game_with_ip(client, &cfg.game_exe, &cfg.servers[i].ip),
+                None => Err("未选择区服".into()),
+            };
+        }
+    }
     match cfg.server_ip.as_deref() {
         Some(ip) if !ip.trim().is_empty() => {
             launch::launch_game_with_ip(client, &cfg.game_exe, ip.trim())
