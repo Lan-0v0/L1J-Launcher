@@ -357,9 +357,7 @@ mod imp {
                 let dim = !matches!(st.phase, Phase::Done | Phase::Failed);
                 draw_bar(hdc, BAR1_Y, st.current, &BLUE, false);
                 draw_bar(hdc, BAR2_Y, st.overall, &RED, false);
-                if dim {
-                    dim_rect(hdc, &bg, BTN_START);
-                }
+                let _ = dim; // 方案B：不动「開始」的图，只在逻辑上禁用点击
 
                 let font = CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 5, 0,
                                        wide("Microsoft YaHei").as_ptr());
