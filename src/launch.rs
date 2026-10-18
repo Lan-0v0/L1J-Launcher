@@ -68,36 +68,43 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    const PATCH_VA: usize = 0x004D_5AF2;
+    /// 需要打的补丁：(地址, 期望原字节, 替换字节)
+    /// 1) 运行期校验 0F 85 (jne) -> 90 E9 (nop+jmp)，跳过 RunTime Expired
+    /// 2) 色深检查 74 40 (je 0x446C1D) -> EB 40 (jmp)，跳过 "仅支持16位色" 提示
+    ///    证据：调用 MessageBox 的返回地址 0x446C1C 来自线程栈回溯
+    const PATCHES: [(usize, &[u8], &[u8]); 2] = [
+        // 1) 运行期校验 -> 跳过 RunTime Expired（厂商同为 90 E9）
+        (0x004D_5AF2, &[0x0F, 0x85], &[0x90, 0xE9]),
+        // 2) 单实例检查 -> 允许继续（厂商同为 EB 14）
+        (0x004D_53B5, &[0x74, 0x14], &[0xEB, 0x14]),
+    ];
 
-    /// 等壳把代码解密后，把 `0F 85` 改成 `90 E9`（与厂商登录器行为一致）
     unsafe fn apply_runtime_patch(proc: *mut c_void) {
-        let want = [0x0Fu8, 0x85u8];
-        let repl = [0x90u8, 0xE9u8];
-        for _ in 0..400 {
-            let mut buf = [0u8; 2];
-            let mut got = 0usize;
-            let ok = ReadProcessMemory(
-                proc,
-                PATCH_VA as *const c_void,
-                buf.as_mut_ptr() as *mut c_void,
-                2,
-                &mut got,
-            );
-            if ok != 0 && got == 2 && buf == want {
-                let mut old = 0u32;
-                let _ = VirtualProtectEx(proc, PATCH_VA as *mut c_void, 2, 0x40, &mut old); // PAGE_EXECUTE_READWRITE
-                let mut written = 0usize;
-                let _ = WriteProcessMemory(
-                    proc,
-                    PATCH_VA as *mut c_void,
-                    repl.as_ptr() as *const c_void,
-                    2,
-                    &mut written,
+        let mut done = [false; PATCHES.len()];
+        for _ in 0..800 {
+            let mut all = true;
+            for (i, (va, want, repl)) in PATCHES.iter().enumerate() {
+                if done[i] { continue; }
+                all = false;
+                let mut buf = [0u8; 4];
+                let mut got = 0usize;
+                let ok = ReadProcessMemory(
+                    proc, *va as *const c_void, buf.as_mut_ptr() as *mut c_void,
+                    want.len(), &mut got,
                 );
-                let _ = VirtualProtectEx(proc, PATCH_VA as *mut c_void, 2, old, &mut old);
-                return;
+                if ok != 0 && got == want.len() && &buf[..want.len()] == *want {
+                    let mut old = 0u32;
+                    let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), 0x40, &mut old);
+                    let mut written = 0usize;
+                    let _ = WriteProcessMemory(
+                        proc, *va as *mut c_void, repl.as_ptr() as *const c_void,
+                        repl.len(), &mut written,
+                    );
+                    let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), old, &mut old);
+                    done[i] = true;
+                }
             }
+            if all { return; }
             Sleep(5);
         }
     }

@@ -95,6 +95,7 @@ extern "system" {
     fn TranslateMessage(msg: *const MSG) -> i32;
     fn DispatchMessageW(msg: *const MSG) -> isize;
     fn PostQuitMessage(code: i32);
+    fn DestroyWindow(h: *mut c_void) -> i32;
     fn BeginPaint(h: *mut c_void, ps: *mut PAINTSTRUCT) -> *mut c_void;
     fn EndPaint(h: *mut c_void, ps: *const PAINTSTRUCT) -> i32;
     fn GetSystemMetrics(idx: i32) -> i32;
@@ -297,6 +298,7 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     if ok {
                         let s = st.as_mut().unwrap();
                         s.picked = Some(i);
+                        DestroyWindow(h);
                         PostQuitMessage(0);
                     }
                 }
@@ -308,6 +310,7 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
             0
         }
         WM_CLOSE | WM_DESTROY => {
+            DestroyWindow(h);
             PostQuitMessage(0);
             0
         }
