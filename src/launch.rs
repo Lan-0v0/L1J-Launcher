@@ -45,6 +45,10 @@ mod imp {
     #[link(name = "kernel32")]
     extern "system" {
         fn WaitForSingleObject(h: *mut c_void, ms: u32) -> u32;
+        fn ReadProcessMemory(p: *mut c_void, addr: *const c_void, buf: *mut c_void, n: usize, got: *mut usize) -> i32;
+        fn WriteProcessMemory(p: *mut c_void, addr: *mut c_void, buf: *const c_void, n: usize, written: *mut usize) -> i32;
+        fn VirtualProtectEx(p: *mut c_void, addr: *mut c_void, n: usize, newp: u32, old: *mut u32) -> i32;
+        fn Sleep(ms: u32);
         fn CreateProcessW(
             app: *const u16,
             cmdline: *mut u16,
@@ -62,6 +66,40 @@ mod imp {
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    const PATCH_VA: usize = 0x004D_5AF2;
+
+    /// 等壳把代码解密后，把 `0F 85` 改成 `90 E9`（与厂商登录器行为一致）
+    unsafe fn apply_runtime_patch(proc: *mut c_void) {
+        let want = [0x0Fu8, 0x85u8];
+        let repl = [0x90u8, 0xE9u8];
+        for _ in 0..400 {
+            let mut buf = [0u8; 2];
+            let mut got = 0usize;
+            let ok = ReadProcessMemory(
+                proc,
+                PATCH_VA as *const c_void,
+                buf.as_mut_ptr() as *mut c_void,
+                2,
+                &mut got,
+            );
+            if ok != 0 && got == 2 && buf == want {
+                let mut old = 0u32;
+                let _ = VirtualProtectEx(proc, PATCH_VA as *mut c_void, 2, 0x40, &mut old); // PAGE_EXECUTE_READWRITE
+                let mut written = 0usize;
+                let _ = WriteProcessMemory(
+                    proc,
+                    PATCH_VA as *mut c_void,
+                    repl.as_ptr() as *const c_void,
+                    2,
+                    &mut written,
+                );
+                let _ = VirtualProtectEx(proc, PATCH_VA as *mut c_void, 2, old, &mut old);
+                return;
+            }
+            Sleep(5);
+        }
     }
 
     /// 直接 CreateProcess：启动器自身已提权，子进程继承管理员令牌。
@@ -117,8 +155,12 @@ mod imp {
                 let e = std::io::Error::last_os_error();
                 return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
-            // 厂商 login.exe 拉起游戏后不会退出；游戏会校验父进程仍在。
-            // 因此这里等待游戏结束，而不是立刻让启动器退出。
+            // ★ 关键补丁：与厂商 login.exe 完全一致
+            // 失败现场： 0F 85 97 00 00 00  (jne 0x4D5B8F  -> 跳去 RunTime Expired)
+            // 成功现场： 90 E9 97 00 00 00  (nop + jmp   -> 永远跳过报错)
+            // 逐字节对比两次 dump 得到，非猜测。
+            apply_runtime_patch(pi.h_process);
+
             WaitForSingleObject(pi.h_process, 0xFFFF_FFFF);
             CloseHandle(pi.h_thread);
             CloseHandle(pi.h_process);

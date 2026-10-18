@@ -320,10 +320,6 @@ pub fn select(servers: Vec<Server>) -> Option<usize> {
     if servers.is_empty() {
         return None;
     }
-    if servers.len() == 1 {
-        // 只有一个服：不需要玩家点，直接返回
-        return Some(0);
-    }
     unsafe { run(servers) }
 }
 
