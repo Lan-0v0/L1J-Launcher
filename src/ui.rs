@@ -164,6 +164,7 @@ extern "system" {
     fn TranslateMessage(msg: *const MSG) -> i32;
     fn DispatchMessageW(msg: *const MSG) -> isize;
     fn PostQuitMessage(code: i32);
+    fn DestroyWindow(h: *mut c_void) -> i32;
     fn BeginPaint(h: *mut c_void, ps: *mut PAINTSTRUCT) -> *mut c_void;
     fn EndPaint(h: *mut c_void, ps: *const PAINTSTRUCT) -> i32;
     fn GetDC(h: *mut c_void) -> *mut c_void;
@@ -373,14 +374,17 @@ mod imp {
                 let y = ((lp >> 16) & 0xFFFF) as i32;
                 if hit(BTN_CLOSE, x, y) {
                     CANCELED.store(true, Ordering::Relaxed);
+                    DestroyWindow(h);
                     PostQuitMessage(0);
                 } else if hit(BTN_CANCEL, x, y) {
                     CANCELED.store(true, Ordering::Relaxed);
+                    DestroyWindow(h);
                     PostQuitMessage(0);
                 } else if hit(BTN_START, x, y) {
                     let st = crate::ui::STATE.get().map(|s| s.lock().unwrap().clone()).unwrap_or_default();
                     if matches!(st.phase, Phase::Done | Phase::Failed) {
                         START_CLICKED.store(true, Ordering::Relaxed);
+                        DestroyWindow(h);
                         PostQuitMessage(0);
                     }
                 } else {
@@ -392,6 +396,7 @@ mod imp {
             }
             WM_CLOSE => {
                 CANCELED.store(true, Ordering::Relaxed);
+                DestroyWindow(h);
                 PostQuitMessage(0);
                 0
             }
