@@ -72,12 +72,28 @@ mod imp {
     /// 1) 运行期校验 0F 85 (jne) -> 90 E9 (nop+jmp)，跳过 RunTime Expired
     /// 2) 色深检查 74 40 (je 0x446C1D) -> EB 40 (jmp)，跳过 "仅支持16位色" 提示
     ///    证据：调用 MessageBox 的返回地址 0x446C1C 来自线程栈回溯
+    /// 实证补丁（由注入 Hook 截获 login.exe 的 WriteProcessMemory 得到）：
+    ///   ADDR=0x004E4320  原字节 0F 8D (jge)  ->  90 E9 (nop + jmp)
+    /// 之前猜测的 0x4D5AF2 是误读，已移除。
+    /// 补丁清单（两处都必须打）：
+    /// 1) 0x4D5AF2  0F 85 -> 90 E9 ：实测可消除 RunTime Expired
+    /// 2) 0x4E4320  0F 8D -> 90 E9 ：由注入 Hook 截获 login.exe 的 WriteProcessMemory 得到
+    /// 补丁清单（两处都必须打）：
+    /// 1) 0x4D5AF2  0F 85 -> 90 E9 ：实测可消除 RunTime Expired
+    /// 2) 0x4E4320  0F 8D -> 90 E9 ：由注入 Hook 截获 login.exe 的 WriteProcessMemory 得到
     const PATCHES: [(usize, &[u8], &[u8]); 2] = [
-        // 1) 运行期校验 -> 跳过 RunTime Expired（厂商同为 90 E9）
         (0x004D_5AF2, &[0x0F, 0x85], &[0x90, 0xE9]),
-        // 2) 单实例检查 -> 允许继续（厂商同为 EB 14）
-        (0x004D_53B5, &[0x74, 0x14], &[0xEB, 0x14]),
+        (0x004E_4320, &[0x0F, 0x8D], &[0x90, 0xE9]),
     ];
+
+    use std::sync::Mutex;
+    static EXTRA: Mutex<Vec<(usize, Vec<u8>, Vec<u8>)>> = Mutex::new(Vec::new());
+
+    pub fn set_extra(list: Vec<(usize, Vec<u8>, Vec<u8>)>) {
+        if let Ok(mut g) = EXTRA.lock() {
+            *g = list;
+        }
+    }
 
     unsafe fn apply_runtime_patch(proc: *mut c_void) {
         let mut done = [false; PATCHES.len()];
@@ -104,8 +120,58 @@ mod imp {
                     done[i] = true;
                 }
             }
-            if all { return; }
+            if all { break; }
             Sleep(5);
+        }
+        // 额外补丁（配置驱动）
+        if let Ok(g) = EXTRA.lock() {
+            for (va, want, repl) in g.iter() {
+                for _ in 0..200 {
+                    let mut buf = vec![0u8; want.len()];
+                    let mut got = 0usize;
+                    let ok = ReadProcessMemory(
+                        proc, *va as *const c_void, buf.as_mut_ptr() as *mut c_void,
+                        want.len(), &mut got,
+                    );
+                    if ok != 0 && got == want.len() && &buf[..] == &want[..] {
+                        let mut old = 0u32;
+                        let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), 0x40, &mut old);
+                        let mut written = 0usize;
+                        let _ = WriteProcessMemory(
+                            proc, *va as *mut c_void, repl.as_ptr() as *const c_void,
+                            repl.len(), &mut written,
+                        );
+                        let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), old, &mut old);
+                        break;
+                    }
+                    Sleep(5);
+                }
+            }
+        }
+    }
+
+    /// 壳会反复重写代码页，补丁可能被覆盖 → 持续重打 20 秒
+    pub unsafe fn patch_watchdog(proc: *mut c_void) {
+        for _ in 0..400 {
+            for (va, want, repl) in PATCHES.iter() {
+                let mut buf = [0u8; 4];
+                let mut got = 0usize;
+                let ok = ReadProcessMemory(
+                    proc, *va as *const c_void, buf.as_mut_ptr() as *mut c_void,
+                    want.len(), &mut got,
+                );
+                if ok != 0 && got == want.len() && &buf[..want.len()] == *want {
+                    let mut old = 0u32;
+                    let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), 0x40, &mut old);
+                    let mut written = 0usize;
+                    let _ = WriteProcessMemory(
+                        proc, *va as *mut c_void, repl.as_ptr() as *const c_void,
+                        repl.len(), &mut written,
+                    );
+                    let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), old, &mut old);
+                }
+            }
+            Sleep(50);
         }
     }
 
@@ -173,6 +239,18 @@ mod imp {
             CloseHandle(pi.h_process);
         }
         Ok(())
+    }
+}
+
+/// 运行时注入的额外补丁（配置驱动，便于二分定位）
+pub fn set_extra_patches(list: Vec<(usize, Vec<u8>, Vec<u8>)>) {
+    #[cfg(windows)]
+    {
+        imp::set_extra(list);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = list;
     }
 }
 

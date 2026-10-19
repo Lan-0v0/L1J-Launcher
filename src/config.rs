@@ -25,6 +25,9 @@ pub struct Config {
     pub client_dir: String,
     /// Ed25519 公钥（32 字节 hex，64 个字符）
     pub public_key: String,
+    /// 额外运行期补丁，格式 "地址:原字节HEX:新字节HEX"（如 "4173DD:75:90"）
+    #[serde(default)]
+    pub extra_patches: Vec<String>,
     /// 区服列表（>=2 个时启动前弹选区窗口）
     #[serde(default)]
     pub servers: Vec<ServerCfg>,
@@ -74,6 +77,7 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
             },
         ],
         launch_on_error: true,
+        extra_patches: Vec::new(),
     };
     std::fs::write(path, serde_json::to_string_pretty(&sample).unwrap())
 }

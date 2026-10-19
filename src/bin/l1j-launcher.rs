@@ -125,10 +125,36 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
     }
 }
 
+/// 解析 "地址:原字节HEX:新字节HEX"
+fn parse_patches(list: &[String]) -> Vec<(usize, Vec<u8>, Vec<u8>)> {
+    let mut out = Vec::new();
+    for item in list {
+        let parts: Vec<&str> = item.split(':').collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let addr = match usize::from_str_radix(parts[0].trim_start_matches("0x"), 16) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let old = (0..parts[1].len() / 2)
+            .filter_map(|i| u8::from_str_radix(&parts[1][i * 2..i * 2 + 2], 16).ok())
+            .collect::<Vec<u8>>();
+        let new = (0..parts[2].len() / 2)
+            .filter_map(|i| u8::from_str_radix(&parts[2][i * 2..i * 2 + 2], 16).ok())
+            .collect::<Vec<u8>>();
+        if !old.is_empty() && old.len() == new.len() {
+            out.push((addr, old, new));
+        }
+    }
+    out
+}
+
 /// 启动：先选服（>=2 个时才弹窗），再按 IP 十进制参数拉起游戏
 fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
+        l1j_launcher::launch::set_extra_patches(parse_patches(&cfg.extra_patches));
         if !cfg.servers.is_empty() {
             let list: Vec<l1j_launcher::select::Server> = cfg
                 .servers
