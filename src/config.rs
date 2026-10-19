@@ -82,12 +82,14 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
                 ip: "124.222.172.24".into(),
                 enabled: false, // 维护中
                 server_data: None,
+                port: None,
             },
             ServerCfg {
                 name: "龙潭天堂·测试服".into(),
                 ip: "124.222.172.24".into(),
                 enabled: true,
                 server_data: None,
+                port: None,
             },
         ],
         launch_arg: Some("2130706433".into()),
