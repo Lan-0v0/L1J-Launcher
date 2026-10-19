@@ -311,27 +311,33 @@ mod imp {
         });
     }
 
-    /// 创建 "tcuhwmyi" 共享内存，写入 0x30（偏移 0x14）。句柄故意不关闭，随进程存活。
-    unsafe fn create_launcher_marker() {
-        // 名字用 UTF-16
+    /// 创建 "tcuhwmyi" 共享内存（厂商结构实证，2026-10-19 用原始 4 区包抓到）：
+    ///   +0x08 u32 = 1
+    ///   +0x0C u32 = 会话值（厂商样本 C4 45 C6 F5，语义未知，照抄一个固定值）
+    ///   +0x14 UTF-16 = "<游戏名>.pak"  例 "TW13032701.pak"
+    /// 写全 0 会让 login.dll 走降级路径（连壳内默认地址），必须按此结构写。
+    unsafe fn create_launcher_marker(pak_stem: &str) {
         let mut name: Vec<u16> = "tcuhwmyi".encode_utf16().collect();
         name.push(0);
         let h = CreateFileMappingW(
-            -1isize as *mut c_void,           // INVALID_HANDLE_VALUE
+            -1isize as *mut c_void,
             std::ptr::null_mut(),
-            0x04,                              // PAGE_READWRITE
+            0x04,
             0,
             4096,
             name.as_ptr(),
         );
-        if h.is_null() {
-            return;
-        }
-        let p = MapViewOfFile(h, 0x000F001F, 0, 0, 4096); // FILE_MAP_ALL_ACCESS
-        if !p.is_null() {
-            let base = p as *mut u8;
-            std::ptr::write_bytes(base, 0, 64);
-            *base.add(0x14) = 0x30;
+        if h.is_null() { return; }
+        let p = MapViewOfFile(h, 0x000F001F, 0, 0, 4096);
+        if p.is_null() { return; }
+        let base = p as *mut u8;
+        std::ptr::write_bytes(base, 0, 128);
+        *(base.add(0x08) as *mut u32) = 1;
+        *(base.add(0x0C) as *mut u32) = 0xF5C6_45C4;
+        let pak: Vec<u16> = format!("{}.pak", pak_stem).encode_utf16().collect();
+        for (i, c) in pak.iter().enumerate() {
+            if 0x14 + i * 2 + 2 > 128 { break; }
+            *(base.add(0x14 + i * 2) as *mut u16) = *c;
         }
     }
 
@@ -339,9 +345,12 @@ mod imp {
     /// 不能用 ShellExecute("runas")——`.bin` 没有文件关联，会报“没有应用程序与该文件有关联”。
     pub fn run(client: &Path, exe_name: &str, args: &str) -> Result<(), String> {
         // 必须在启动游戏之前建好标记，游戏启动时会检查
-        unsafe { create_launcher_marker(); }
-        if let Some(ip) = client_ip_hint() {
-            start_local_proxy(&ip);
+        {
+            let stem = std::path::Path::new(exe_name)
+                .file_stem()
+                .map(|v| v.to_string_lossy().to_string())
+                .unwrap_or_else(|| "TW13032701".into());
+            unsafe { create_launcher_marker(&stem); }
         }
         let exe = client.join(exe_name);
         if !exe.is_file() {

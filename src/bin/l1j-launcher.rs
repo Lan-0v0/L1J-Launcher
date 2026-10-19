@@ -155,24 +155,10 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         l1j_launcher::launch::set_extra_patches(parse_patches(&cfg.extra_patches));
-        // 用第一个可用区的 IP 作为转发目标
-        if let Some(sv) = cfg.servers.iter().find(|x| x.enabled) {
-            l1j_launcher::launch::set_real_server(&sv.ip);
-        }
         if cfg.dev_skip_select {
             let pick = cfg.servers.iter().position(|x| x.enabled).unwrap_or(0);
-            if let Some(blob) = cfg.servers[pick].server_data.as_deref() {
-                if let Err(e) = l1j_launcher::launch::apply_server_data(client, blob) {
-                    eprintln!("写入 Login.ini 失败: {}", e);
-                }
-            }
-            {
-                let sv = &cfg.servers[pick];
-                if let Err(e) = l1j_launcher::launch::apply_lineage_cfg(
-                    client, &sv.ip, sv.port.unwrap_or(2000)) {
-                    eprintln!("写入 lineage.cfg 失败: {}", e);
-                }
-            }
+            let sv = &cfg.servers[pick];
+            sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
             return match cfg.launch_arg.as_deref() {
                 Some(a) if !a.trim().is_empty() => {
                     l1j_launcher::launch::launch_game_with_args(client, &cfg.game_exe, a.trim())
@@ -193,19 +179,9 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                 .collect();
             return match l1j_launcher::select::select(list) {
                 Some(i) => {
-                    if let Some(blob) = cfg.servers[i].server_data.as_deref() {
-                        if let Err(e) = launch::apply_server_data(client, blob) {
-                            eprintln!("写入 Login.ini 失败: {}", e);
-                        }
-                    }
-                    {
-                        let sv = &cfg.servers[i];
-                        if let Err(e) = launch::apply_lineage_cfg(
-                            client, &sv.ip, sv.port.unwrap_or(2000)) {
-                            eprintln!("写入 lineage.cfg 失败: {}", e);
-                        }
-                    }
-                    launch::launch_game_with_ip(client, &cfg.game_exe, &cfg.servers[i].ip)
+                    let sv = &cfg.servers[i];
+                    sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
+                    launch::launch_game_with_ip(client, &cfg.game_exe, &sv.ip)
                 }
                 None => Err("未选择区服".into()),
             };
@@ -217,6 +193,22 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
         }
         _ => launch::launch_game(client, &cfg.game_exe),
     }
+}
+
+/// 选区写入日志（GUI 程序 eprintln 不可见，必须落盘）
+fn sel_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+        .open("D://l1log//sel_log.txt") {
+        let _ = writeln!(f, "[{}] {}", chrono_now(), msg);
+    }
+}
+fn chrono_now() -> String {
+    // 简易时间戳（秒级）
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_else(|_| "?".into())
 }
 
 fn trim(s: &str, n: usize) -> String {
