@@ -19,6 +19,9 @@ pub struct ServerCfg {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// 用厂商登录器自带的选区弹窗当唯一选区界面（骷髅同款结构）
+    #[serde(default)]
+    pub use_vendor_dialog: bool,
     /// 更新站根地址，必须以 / 结尾，例如 "https://example.com/l1update/"
     pub update_base: String,
     /// 更新完成后要启动的程序（相对客户端目录）
@@ -71,6 +74,7 @@ impl Config {
 /// 写入示例配置（首次运行时放置）
 pub fn write_example(path: &Path) -> std::io::Result<()> {
     let sample = Config {
+        use_vendor_dialog: false,
         update_base: "https://your-domain/l1update/".into(),
         game_exe: "login.exe".into(),
         server_ip: None,

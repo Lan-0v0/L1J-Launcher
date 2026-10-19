@@ -52,6 +52,10 @@ mod imp {
         fn CreateFileMappingW(h: *mut c_void, sa: *mut c_void, prot: u32,
                               hi: u32, lo: u32, name: *const u16) -> *mut c_void;
         fn MapViewOfFile(h: *mut c_void, access: u32, hi: u32, lo: u32, n: usize) -> *mut c_void;
+        fn CreateDesktopW(name: *const u16, dev: *const u16, dm: *mut c_void,
+                          flags: u32, access: u32, sa: *mut c_void) -> *mut c_void;
+        fn EnumDesktopWindows(h: *mut c_void, cb: unsafe extern "system" fn(*mut c_void, isize) -> i32, p: isize) -> i32;
+        fn CloseDesktop(h: *mut c_void) -> i32;
         fn CreateProcessW(
             app: *const u16,
             cmdline: *mut u16,
@@ -234,8 +238,8 @@ mod imp {
     static REAL_SERVER: Mutex<String> = Mutex::new(String::new());
 
     /// 挂起状态下把 login.dll 注入游戏（厂商登录器的核心动作）
-    unsafe fn inject_login_dll(proc: *mut c_void, client: &Path) -> bool {
-        let dll = client.join("login.dll");
+    unsafe fn inject_dll(proc: *mut c_void, client: &Path, file: &str) -> bool {
+        let dll = client.join(file);
         let mut pb: Vec<u16> = dll.as_os_str().to_string_lossy().encode_utf16().collect();
         pb.push(0);
         let mem = VirtualAllocEx(proc, std::ptr::null_mut(), 4096, 0x3000, 0x04);
@@ -259,6 +263,73 @@ mod imp {
             .open(r"D://l1log//inject_log.txt")
             .and_then(|mut f| { use std::io::Write; writeln!(f, "远程 LoadLibrary 返回基址: 0x{:X}", code) });
         code != 0
+    }
+
+    /// 把游戏连接配置强制改成 127.0.0.1:relay_port（挂起态先写，恢复后 1ms 高频补写）
+    unsafe fn addr_force(proc: *mut c_void, relay_port: u16) {
+        use std::io::Write;
+        let pv = (relay_port as u32).to_le_bytes();
+        let ip = [127u8, 0, 0, 1];
+        let mut tb = b"127.0.0.1".to_vec(); tb.push(0);
+        let mut old_prot = 0u32;
+        let _ = VirtualProtectEx(proc, 0x9E24E0usize as *mut c_void, 0x20, 0x40, &mut old_prot);
+        let mut w = 0usize;
+        let _ = WriteProcessMemory(proc, 0x9E24E0usize as *mut c_void, pv.as_ptr() as *const c_void, 4, &mut w);
+        let _ = WriteProcessMemory(proc, 0x9E24E4usize as *mut c_void, ip.as_ptr() as *const c_void, 4, &mut w);
+        let _ = WriteProcessMemory(proc, 0x9E24F0usize as *mut c_void, tb.as_ptr() as *const c_void, tb.len(), &mut w);
+        let _ = VirtualProtectEx(proc, 0x9E24E0usize as *mut c_void, 0x20, old_prot, &mut old_prot);
+        for _ in 0..30000 {
+            let mut cur = [0u8; 4];
+            let mut cp = [0u8; 4];
+            let mut got = 0usize;
+            let ok = ReadProcessMemory(proc, 0x9E24E4usize as *const c_void,
+                                       cur.as_mut_ptr() as *mut c_void, 4, &mut got);
+            let _ = ReadProcessMemory(proc, 0x9E24E0usize as *const c_void,
+                                      cp.as_mut_ptr() as *mut c_void, 4, &mut got);
+            if ok != 0 && (cur != ip || cp != pv) {
+                let mut o = 0u32;
+                let _ = VirtualProtectEx(proc, 0x9E24E0usize as *mut c_void, 0x20, 0x40, &mut o);
+                let _ = WriteProcessMemory(proc, 0x9E24E0usize as *mut c_void, pv.as_ptr() as *const c_void, 4, &mut w);
+                let _ = WriteProcessMemory(proc, 0x9E24E4usize as *mut c_void, ip.as_ptr() as *const c_void, 4, &mut w);
+                let _ = WriteProcessMemory(proc, 0x9E24F0usize as *mut c_void, tb.as_ptr() as *const c_void, tb.len(), &mut w);
+                let _ = VirtualProtectEx(proc, 0x9E24E0usize as *mut c_void, 0x20, o, &mut o);
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+                    .open(r"D://l1log//relay_patch.txt") {
+                    let _ = writeln!(f, "改写 -> 127.0.0.1:{} (原 ip={:02X?} port={:02X?})", relay_port, cur, cp);
+                }
+            }
+            Sleep(1);
+        }
+    }
+
+    /// 启动本地中继：监听 127.0.0.1:0（系统分配），转发到 target。返回监听端口。
+    pub fn start_relay(target: &str) -> Option<u16> {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        let l = TcpListener::bind("127.0.0.1:0").ok()?;
+        let port = l.local_addr().ok()?.port();
+        let t = target.to_string();
+        std::thread::spawn(move || {
+            for c in l.incoming() {
+                let mut c = match c { Ok(v) => v, Err(_) => continue };
+                let t2 = t.clone();
+                std::thread::spawn(move || {
+                    let mut s = match TcpStream::connect(&t2) { Ok(v) => v, Err(_) => return };
+                    let _ = c.set_nodelay(true); let _ = s.set_nodelay(true);
+                    let mut c2 = match c.try_clone() { Ok(v) => v, Err(_) => return };
+                    let mut s2 = match s.try_clone() { Ok(v) => v, Err(_) => return };
+                    std::thread::spawn(move || { let _ = std::io::copy(&mut c2, &mut s2); });
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match s.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => { if c.write_all(&buf[..n]).is_err() { break; } }
+                        }
+                    }
+                });
+            }
+        });
+        Some(port)
     }
 
     /// 本地转发：127.0.0.1:2000 -> 真实服务器（对应厂商 login.dll 的作用）
@@ -316,6 +387,95 @@ mod imp {
     ///   +0x0C u32 = 会话值（厂商样本 C4 45 C6 F5，语义未知，照抄一个固定值）
     ///   +0x14 UTF-16 = "<游戏名>.pak"  例 "TW13032701.pak"
     /// 写全 0 会让 login.dll 走降级路径（连壳内默认地址），必须按此结构写。
+    static AUTO_CLICK: Mutex<Option<(f64, f64)>> = Mutex::new(None);
+    pub static CIDX: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    /// 设置厂商弹窗的自动点击位置（窗口比例坐标）
+    pub fn set_auto_click(fx: f64, fy: f64) {
+        if let Ok(mut g) = AUTO_CLICK.lock() { *g = Some((fx, fy)); }
+    }
+    pub fn set_click_index(i: usize) {
+        CIDX.store(i, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 隐藏厂商选区窗口，并给它第 idx 个「有标题的 Button」发 BM_CLICK（不碰鼠标）
+    pub fn click_vendor_entry(pid: u32, idx: usize, ini: String, hdesk: usize) {
+        #[cfg(windows)]
+        unsafe {
+            use std::ffi::c_void;
+            #[link(name = "user32")]
+            extern "system" {
+                fn EnumWindows(cb: unsafe extern "system" fn(*mut c_void, isize) -> i32, p: isize) -> i32;
+                fn EnumChildWindows(h: *mut c_void, cb: unsafe extern "system" fn(*mut c_void, isize) -> i32, p: isize) -> i32;
+                fn GetWindowThreadProcessId(h: *mut c_void, pid: *mut u32) -> u32;
+                fn GetClientRect(h: *mut c_void, r: *mut [i32; 4]) -> i32;
+                fn GetClassNameW(h: *mut c_void, buf: *mut u16, n: i32) -> i32;
+                fn GetWindowTextW(h: *mut c_void, buf: *mut u16, n: i32) -> i32;
+                fn ShowWindow(h: *mut c_void, cmd: i32) -> i32;
+                fn PostMessageW(h: *mut c_void, msg: u32, w: usize, l: isize) -> i32;
+            }
+            static mut T: *mut c_void = std::ptr::null_mut();
+            unsafe extern "system" fn cb(h: *mut c_void, p: isize) -> i32 {
+                let mut wpid = 0u32;
+                GetWindowThreadProcessId(h, &mut wpid);
+                if wpid == p as u32 {
+                    let mut r = [0i32; 4];
+                    if GetClientRect(h, &mut r) != 0 && r[2] > 200 && r[3] > 150 {
+                        let mut c = [0u16; 32];
+                        GetClassNameW(h, c.as_mut_ptr(), 32);
+                        let cls = String::from_utf16_lossy(&c[..c.iter().position(|&x| x == 0).unwrap_or(0)]);
+                        if cls == "#32770" { T = h; return 0; }
+                    }
+                }
+                1
+            }
+            let mut hwnd: *mut c_void = std::ptr::null_mut();
+            for _ in 0..4000 {
+                T = std::ptr::null_mut();
+                if hdesk != 0 {
+                    EnumDesktopWindows(hdesk as *mut c_void, cb, pid as isize);
+                } else {
+                    EnumWindows(cb, pid as isize);
+                }
+                if !T.is_null() { hwnd = T; break; }
+                Sleep(5);
+            }
+            if hwnd.is_null() { return; }
+            // 窗口由 quiet.dll 在「显示事件」里隐藏；这里只需等按钮就绪后点击
+            Sleep(900);
+
+            static mut B: [*mut c_void; 16] = [std::ptr::null_mut(); 16];
+            static mut NB: usize = 0;
+            NB = 0;
+            unsafe extern "system" fn kc(ch: *mut c_void, _p: isize) -> i32 {
+                let mut c = [0u16; 32];
+                GetClassNameW(ch, c.as_mut_ptr(), 32);
+                let cls = String::from_utf16_lossy(&c[..c.iter().position(|&x| x == 0).unwrap_or(0)]);
+                if cls == "Button" {
+                    let mut t = [0u16; 128];
+                    GetWindowTextW(ch, t.as_mut_ptr(), 128);
+                    let title = String::from_utf16_lossy(&t[..t.iter().position(|&x| x == 0).unwrap_or(0)]);
+                    if !title.is_empty() && NB < 16 {
+                        B[NB] = ch; NB += 1;
+                    }
+                }
+                1
+            }
+            EnumChildWindows(hwnd, kc, 0);
+            if idx < NB {
+                PostMessageW(B[idx], 0x00F5, 0, 0); // BM_CLICK
+
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open(r"D://l1log//autoclick.txt")
+                    .and_then(|mut f| { use std::io::Write; writeln!(f, "BM_CLICK 第{}个按钮 (共{}个) pid={}", idx, NB, pid) });
+                // 3 秒后删掉配置：玩家直接运行厂商 exe 时会看到空列表（与骷髅一致）
+                std::thread::spawn(move || {
+                    Sleep(3000);
+                    let _ = std::fs::remove_file(&ini);
+                });
+            }
+        }
+    }
+
     unsafe fn create_launcher_marker(pak_stem: &str) {
         let mut name: Vec<u16> = "tcuhwmyi".encode_utf16().collect();
         name.push(0);
@@ -345,7 +505,8 @@ mod imp {
     /// 不能用 ShellExecute("runas")——`.bin` 没有文件关联，会报“没有应用程序与该文件有关联”。
     pub fn run(client: &Path, exe_name: &str, args: &str) -> Result<(), String> {
         // 必须在启动游戏之前建好标记，游戏启动时会检查
-        {
+        let is_game = exe_name.to_lowercase().ends_with(".bin");
+        if is_game {
             let stem = std::path::Path::new(exe_name)
                 .file_stem()
                 .map(|v| v.to_string_lossy().to_string())
@@ -359,10 +520,13 @@ mod imp {
         let app = wide(&exe.to_string_lossy());
         let mut cmd = wide(&format!("\"{}\" {}", exe.display(), args));
         let cwd = wide(&client.to_string_lossy());
+        // 不使用独立桌面（兼容性考虑）：靠 SW_HIDE + 5ms 轮询立刻隐藏
+        let hdesk: *mut c_void = std::ptr::null_mut();
+        let mut desk_name: Vec<u16> = Vec::new();
         let si = STARTUPINFOW {
             cb: std::mem::size_of::<STARTUPINFOW>() as u32,
             lp_reserved: std::ptr::null_mut(),
-            lp_desktop: std::ptr::null_mut(),
+            lp_desktop: if desk_name.is_empty() { std::ptr::null_mut() } else { desk_name.as_mut_ptr() },
             lp_title: std::ptr::null_mut(),
             dw_x: 0,
             dw_y: 0,
@@ -371,8 +535,8 @@ mod imp {
             dw_x_count_chars: 0,
             dw_y_count_chars: 0,
             dw_fill_attribute: 0,
-            dw_flags: 0,
-            w_show_window: 1,
+            dw_flags: 1,   // STARTF_USESHOWWINDOW（配合 wShowWindow=SW_HIDE）
+            w_show_window: 0,   // SW_HIDE：厂商窗口不显示
             cb_reserved2: 0,
             lp_reserved2: std::ptr::null_mut(),
             h_std_input: std::ptr::null_mut(),
@@ -386,13 +550,14 @@ mod imp {
             dw_thread_id: 0,
         };
         unsafe {
+            let flags: u32 = 0x00000004; // 总是挂起创建，注入完再恢复
             let ok = CreateProcessW(
                 app.as_ptr(),
                 cmd.as_mut_ptr(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
-                0x00000004,   // CREATE_SUSPENDED：先挂起，注入 login.dll 后再恢复
+                flags,
                 std::ptr::null_mut(),
                 cwd.as_ptr(),
                 &si,
@@ -402,11 +567,39 @@ mod imp {
                 let e = std::io::Error::last_os_error();
                 return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
+            if !is_game {
+                if client.join("quiet.dll").is_file() {
+                    let inj = inject_dll(pi.h_process, client, "quiet.dll");
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(r"D://l1log//inject_log.txt")
+                        .and_then(|mut f| { use std::io::Write; writeln!(f, "quiet.dll 注入: {}", inj) });
+                }
+                ResumeThread(pi.h_thread);
+                {
+                    let cpid = pi.dw_process_id;
+                    let ini_name = format!("{}.ini", std::path::Path::new(exe_name)
+                        .file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default());
+                    let ini_path = client.join(ini_name).to_string_lossy().to_string();
+                    let hd = hdesk as usize;
+                    std::thread::spawn(move || click_vendor_entry(cpid, CIDX.load(std::sync::atomic::Ordering::Relaxed), ini_path, hd));
+                }
+                WaitForSingleObject(pi.h_process, 0xFFFF_FFFF);
+                CloseHandle(pi.h_thread);
+                CloseHandle(pi.h_process);
+                return Ok(());
+            }
             // ★ 在游戏跑任何代码之前，把 login.dll（登录 UI 库）注入进去
-            let inj = inject_login_dll(pi.h_process, client);
+            let inj = inject_dll(pi.h_process, client, "login.dll");
             let _ = std::fs::OpenOptions::new().create(true).append(true)
                 .open(r"D://l1log//inject_log.txt")
                 .and_then(|mut f| { use std::io::Write; writeln!(f, "login.dll 注入: {}", inj) });
+            // 连接重定向（若客户端目录有 redirect.dll 且有目标文件）
+            if client.join("redirect.dll").is_file() {
+                let inj2 = inject_dll(pi.h_process, client, "redirect.dll");
+                let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open(r"D://l1log//inject_log.txt")
+                    .and_then(|mut f| { use std::io::Write; writeln!(f, "redirect.dll 注入: {}", inj2) });
+            }
             ResumeThread(pi.h_thread);
 
             // ★ 关键补丁：与厂商 login.exe 完全一致
@@ -473,6 +666,30 @@ pub fn apply_lineage_cfg(client: &Path, ip: &str, port: u16) -> Result<(), Strin
     Ok(())
 }
 
+/// 把选中区的 ServerData 写进指定 ini（厂商登录器读"与自身同名"的 ini）
+pub fn write_server_data(client: &Path, ini_name: &str, blob: &str) -> Result<(), String> {
+    let ini = client.join(ini_name);
+    let data = std::fs::read(&ini).map_err(|e| format!("读 {}: {}", ini_name, e))?;
+    let key = b"ServerData=";
+    let mut out: Vec<u8> = Vec::with_capacity(data.len() + blob.len());
+    let mut i = 0usize;
+    let mut done = false;
+    while i < data.len() {
+        if !done && data[i..].starts_with(key) {
+            out.extend_from_slice(key);
+            out.extend_from_slice(blob.as_bytes());
+            while i < data.len() && data[i] != b'\r' && data[i] != b'\n' { i += 1; }
+            done = true;
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    if !done { return Err(format!("{} 里没有 ServerData=", ini_name)); }
+    std::fs::write(&ini, &out).map_err(|e| format!("写 {}: {}", ini_name, e))?;
+    Ok(())
+}
+
 /// 把选中区的 ServerData 写进客户端 Login.ini（游戏启动时自己读取并解密）
 pub fn apply_server_data(client: &Path, blob: &str) -> Result<(), String> {
     let ini = client.join("Login.ini");
@@ -498,6 +715,19 @@ pub fn apply_server_data(client: &Path, blob: &str) -> Result<(), String> {
 }
 
 /// 设置真实服务器地址（用于本地转发）
+pub fn set_click_index(i: usize) {
+    #[cfg(windows)]
+    { imp::set_click_index(i); }
+    #[cfg(not(windows))]
+    { let _ = i; }
+}
+pub fn set_auto_click(fx: f64, fy: f64) {
+    #[cfg(windows)]
+    { imp::set_auto_click(fx, fy); }
+    #[cfg(not(windows))]
+    { let _ = (fx, fy); }
+}
+
 pub fn set_real_server(ip: &str) {
     #[cfg(windows)]
     { imp::set_real_server(ip); }

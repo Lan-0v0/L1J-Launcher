@@ -155,10 +155,37 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         l1j_launcher::launch::set_extra_patches(parse_patches(&cfg.extra_patches));
+        if cfg.use_vendor_dialog && !cfg.game_exe.to_lowercase().ends_with(".bin") {
+            let ini = format!("{}.ini",
+                std::path::Path::new(&cfg.game_exe)
+                    .file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default());
+            let src = client.join("servers.ini");
+            if src.is_file() {
+                match std::fs::copy(&src, client.join(&ini)) {
+                    Ok(_) => sel_log(&format!("已写 {}（来自 servers.ini）", ini)),
+                    Err(e) => sel_log(&format!("复制 servers.ini 失败: {}", e)),
+                }
+            } else {
+                sel_log("缺少 servers.ini");
+            }
+            return launch::launch_game(client, &cfg.game_exe);
+        }
         if cfg.dev_skip_select {
             let pick = cfg.servers.iter().position(|x| x.enabled).unwrap_or(0);
             let sv = &cfg.servers[pick];
             sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
+            let _ = std::fs::write(client.join("target.txt"),
+                format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
+
+            l1j_launcher::launch::set_real_server(&format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
+            if let Some(blob) = sv.server_data.as_deref() {
+                let ini = if cfg.game_exe.to_lowercase().ends_with(".bin") {
+                    "Login.ini".to_string()
+                } else {
+                    format!("{}.ini", std::path::Path::new(&cfg.game_exe).file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default())
+                };
+                sel_log(&format!("写 {}: {:?}", ini, l1j_launcher::launch::write_server_data(client, &ini, blob)));
+            }
             return match cfg.launch_arg.as_deref() {
                 Some(a) if !a.trim().is_empty() => {
                     l1j_launcher::launch::launch_game_with_args(client, &cfg.game_exe, a.trim())
@@ -181,6 +208,27 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                 Some(i) => {
                     let sv = &cfg.servers[i];
                     sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
+                    launch::set_click_index(i);
+                    {
+                        let ini = if cfg.game_exe.to_lowercase().ends_with(".bin") { "Login.ini".to_string() }
+                                  else { format!("{}.ini", std::path::Path::new(&cfg.game_exe).file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default()) };
+                        if client.join("servers.ini").is_file() {
+                            let _ = std::fs::copy(client.join("servers.ini"), client.join(&ini));
+                            sel_log(&format!("已写 {}（全部区服）", ini));
+                        }
+                    }
+                    let _ = std::fs::write(client.join("target.txt"),
+                        format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
+
+                    launch::set_real_server(&format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
+                    if let Some(blob) = sv.server_data.as_deref() {
+                        let ini = if cfg.game_exe.to_lowercase().ends_with(".bin") {
+                    "Login.ini".to_string()
+                } else {
+                    format!("{}.ini", std::path::Path::new(&cfg.game_exe).file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default())
+                };
+                        sel_log(&format!("写 {}: {:?}", ini, launch::write_server_data(client, &ini, blob)));
+                    }
                     launch::launch_game_with_ip(client, &cfg.game_exe, &sv.ip)
                 }
                 None => Err("未选择区服".into()),
