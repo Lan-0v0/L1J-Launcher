@@ -461,6 +461,8 @@ mod imp {
                 1
             }
             EnumChildWindows(hwnd, kc, 0);
+            // 所有条目都指向本地中继，点哪个都一样；索引越界时钳到最后一个
+            let idx = if NB == 0 { 0 } else { idx.min(NB - 1) };
             if idx < NB {
                 PostMessageW(B[idx], 0x00F5, 0, 0); // BM_CLICK
 
@@ -568,6 +570,10 @@ mod imp {
                 return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
             if !is_game {
+                // 中继：厂商解密出的 127.0.0.1:2000 → 转发到选中区
+                if let Some(t) = client_ip_hint() {
+                    start_local_proxy(&t);
+                }
                 if client.join("quiet.dll").is_file() {
                     let inj = inject_dll(pi.h_process, client, "quiet.dll");
                     let _ = std::fs::OpenOptions::new().create(true).append(true)
