@@ -46,11 +46,23 @@ fn main() {
         let cfg2 = cfg.clone();
         let client2 = client.clone();
         std::thread::spawn(move || worker(cfg2, client2, st));
-        let rc = ui::run(state);
-        if ui::start_clicked() {
-            let _ = do_launch(&cfg, &client);
+        // 主循环：加载窗 → 开始 → 选区窗；选区点「取消」回到加载窗，X / 启动成功则退出
+        loop {
+            ui::reset_flags();
+            let rc = ui::run(state.clone());
+            if !ui::start_clicked() {
+                std::process::exit(rc);
+            }
+            match do_launch(&cfg, &client) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    if l1j_launcher::select::quit_requested() || e != "未选择区服" {
+                        std::process::exit(1);
+                    }
+                    // 「取消」→ 继续循环，重新弹出加载界面
+                }
+            }
         }
-        std::process::exit(rc);
     }
     #[cfg(not(windows))]
     console_flow(&cfg, &client);

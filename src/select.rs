@@ -8,7 +8,7 @@
 #![cfg(windows)]
 use std::ffi::c_void;
 use std::net::{SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 pub const W: i32 = 692;
@@ -154,6 +154,21 @@ const DIB_RGB_COLORS: u32 = 0;
 
 static BG_BMP: &[u8] = include_bytes!("../assets/serverlist.bmp");
 static BTN_BMP: &[u8] = include_bytes!("../assets/button.bmp");
+
+// ---- 背景图内嵌按钮热区（serverlist.bmp 实测像素：取消=396..500×414..447，X=666..690×2..26）----
+const CANCEL_RECT: (i32, i32, i32, i32) = (392, 408, 504, 452);
+const CLOSE_RECT: (i32, i32, i32, i32) = (660, 0, 692, 32);
+
+static QUIT: AtomicBool = AtomicBool::new(false);
+
+/// X 按钮是否被点击过（真·退出启动器，区别于「取消回加载界面」）
+pub fn quit_requested() -> bool {
+    QUIT.load(Ordering::Relaxed)
+}
+
+fn in_rect(r: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
+    x >= r.0 && x < r.2 && y >= r.1 && y < r.3
+}
 
 // ---- 真实 Ping ----
 // 后台线程对每个 enabled 区做 TCP connect，结果写入原子数组后 PostMessage 触发重绘。
@@ -357,6 +372,19 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
         WM_LBUTTONDOWN => {
             let x = (lp & 0xFFFF) as i32;
             let y = ((lp >> 16) & 0xFFFF) as i32;
+            // 右上角 X：关闭整个启动器
+            if in_rect(CLOSE_RECT, x, y) {
+                QUIT.store(true, Ordering::Relaxed);
+                DestroyWindow(h);
+                PostQuitMessage(0);
+                return 0;
+            }
+            // 取消：关闭选区窗，回到加载界面（picked 保持 None）
+            if in_rect(CANCEL_RECT, x, y) {
+                DestroyWindow(h);
+                PostQuitMessage(0);
+                return 0;
+            }
             let mut hit = None;
             if let Some(s) = st.as_ref() {
                 let n = s.servers.len();
@@ -389,8 +417,14 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
             InvalidateRect(h, std::ptr::null(), 0);
             0
         }
-        WM_CLOSE | WM_DESTROY => {
+        WM_CLOSE => {
+            // 系统关闭（Alt+F4 等）视同 X：退出启动器
+            QUIT.store(true, Ordering::Relaxed);
             DestroyWindow(h);
+            PostQuitMessage(0);
+            0
+        }
+        WM_DESTROY => {
             PostQuitMessage(0);
             0
         }
@@ -409,6 +443,7 @@ pub fn select(servers: Vec<Server>) -> Option<usize> {
 unsafe fn run(servers: Vec<Server>) -> Option<usize> {
     let st = &mut *std::ptr::addr_of_mut!(STATE);
     *st = Some(SelectState { servers, picked: None, hover: None });
+    QUIT.store(false, Ordering::Relaxed);
 
     let inst = GetModuleHandleW(std::ptr::null());
     let cls = wide("L1JServerSelect");

@@ -84,6 +84,11 @@ pub fn canceled() -> bool {
 pub fn start_clicked() -> bool {
     START_CLICKED.load(Ordering::Relaxed)
 }
+/// 重入加载窗前调用：清掉上一轮的点击/取消标志，否则第二轮会直接跳过加载窗
+pub fn reset_flags() {
+    START_CLICKED.store(false, Ordering::Relaxed);
+    CANCELED.store(false, Ordering::Relaxed);
+}
 
 pub fn run(state: Shared) -> i32 {
     unsafe { imp::run(state) }
