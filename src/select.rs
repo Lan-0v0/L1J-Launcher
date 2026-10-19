@@ -157,8 +157,8 @@ const DIB_RGB_COLORS: u32 = 0;
 static BG_BMP: &[u8] = include_bytes!("../assets/serverlist.bmp");
 static BTN_BMP: &[u8] = include_bytes!("../assets/button.bmp");
 
-// ---- 功能按钮：绘制矩形 = 命中矩形（同一份常量，绝不出现两套坐标）----
-// 底图里原有的 Recover/取消 像素已抹平（assets/serverlist.bmp），这里用 button.bmp 画成真正的按钮层
+// ---- 功能按钮：命中矩形（外观是底图原像素，绝不另画贴图）----
+// 实测 serverlist.bmp 原图烧死像素：Recover 207..299×415..444、取消 400..492×415..444
 const BTN_RECOVER: (i32, i32, i32, i32) = (207, 415, 300, 445); // 93x30
 const BTN_CANCEL: (i32, i32, i32, i32) = (400, 415, 493, 445);  // 93x30
 // 右上角 X 是底图自带的浮雕方块（周围是纯黑带，重画反而更差），保留原像素，只加热区
@@ -302,25 +302,6 @@ unsafe fn draw_img(hdc: *mut c_void, img: &Img, x: i32, y: i32) {
                   img.bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
 }
 
-/// 绘制到指定尺寸（StretchDIBits 支持缩放，用于把 153x31 的 button.bmp 画成 93x30）
-unsafe fn draw_img_ex(hdc: *mut c_void, img: &Img, x: i32, y: i32, dw: i32, dh: i32) {
-    let bi = BITMAPINFOHEADER {
-        bi_size: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-        bi_width: img.w,
-        bi_height: -img.h,
-        bi_planes: 1,
-        bi_bit_count: 32,
-        bi_compression: BI_RGB,
-        bi_size_image: 0,
-        bi_x_pels: 0,
-        bi_y_pels: 0,
-        bi_clr_used: 0,
-        bi_clr_important: 0,
-    };
-    StretchDIBits(hdc, x, y, dw, dh, 0, 0, img.w, img.h,
-                  img.bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
-}
-
 /// hover 高亮边框
 unsafe fn frame(hdc: *mut c_void, r: (i32, i32, i32, i32), color: u32) {
     let br = CreateSolidBrush(color);
@@ -426,30 +407,15 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     dot(hdc, cx, y + PLATE_H / 2, dot_c);
                 }
             }
-            // ---- 底部功能按钮：真正的绘制层（底图原像素已抹平）----
-            for (rect, label, hov) in [
-                (BTN_RECOVER, "Recover", HOV_RECOVER),
-                (BTN_CANCEL, "取消", HOV_CANCEL),
-            ] {
-                draw_img_ex(hdc, &btn, rect.0, rect.1, rect.2 - rect.0, rect.3 - rect.1);
-                let mut rc = RECT { left: rect.0, top: rect.1, right: rect.2, bottom: rect.3 };
-                let mut t: Vec<u16> = label.encode_utf16().collect();
-                t.push(0);
-                SelectObject(hdc, font);
-                SetTextColor(hdc, rgb(12, 9, 6));
-                let mut sh = RECT { left: rc.left + 1, top: rc.top + 1, right: rc.right + 1, bottom: rc.bottom + 1 };
-                DrawTextW(hdc, t.as_ptr(), (t.len() - 1) as i32, &mut sh,
-                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                SetTextColor(hdc, rgb(255, 252, 238));
-                DrawTextW(hdc, t.as_ptr(), (t.len() - 1) as i32, &mut rc,
-                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-                if st.as_ref().and_then(|s| s.hover) == Some(hov) {
-                    frame(hdc, rect, HOV_COLOR);
+            // ---- 底部功能按钮：外观完全沿用底图原像素（严禁自造贴图）----
+            // 这里只叠 hover 提示框；按钮本体就是 serverlist.bmp 里烧死的原图
+            if let Some(hv) = st.as_ref().and_then(|s| s.hover) {
+                match hv {
+                    HOV_RECOVER => frame(hdc, BTN_RECOVER, HOV_COLOR),
+                    HOV_CANCEL => frame(hdc, BTN_CANCEL, HOV_COLOR),
+                    HOV_CLOSE => frame(hdc, BTN_CLOSE, HOV_COLOR),
+                    _ => {}
                 }
-            }
-            // X 保留底图像素，只叠 hover 边框
-            if st.as_ref().and_then(|s| s.hover) == Some(HOV_CLOSE) {
-                frame(hdc, BTN_CLOSE, HOV_COLOR);
             }
             DeleteObject(font);
             EndPaint(h, &ps);

@@ -240,36 +240,6 @@ mod imp {
 
     // 底图（BMP，24bpp，54 字节头）
     static BG_BMP: &[u8] = include_bytes!("../assets/bulletin.bmp");
-    // 按钮贴图（与选区窗同一张，153×31）
-    static BTN_BMP: &[u8] = include_bytes!("../assets/button.bmp");
-
-    pub struct Img {
-        pub w: i32,
-        pub h: i32,
-        pub bits: Vec<u8>,    // BGRA 自顶向下
-        pub dim: Vec<u8>,     // 50% 暗化副本（禁用态）
-    }
-
-    pub fn parse_img(d: &[u8]) -> Img {
-        let off = u32::from_le_bytes([d[10], d[11], d[12], d[13]]) as usize;
-        let w = i32::from_le_bytes([d[18], d[19], d[20], d[21]]);
-        let h = i32::from_le_bytes([d[22], d[23], d[24], d[25]]).abs();
-        let stride = ((w as usize * 3 + 3) / 4) * 4;
-        let mut bits = vec![0u8; (w * h * 4) as usize];
-        for y in 0..h as usize {
-            let src_y = h as usize - 1 - y;
-            for x in 0..w as usize {
-                let s = off + src_y * stride + x * 3;
-                let dst = (y * w as usize + x) * 4;
-                bits[dst] = d[s];
-                bits[dst + 1] = d[s + 1];
-                bits[dst + 2] = d[s + 2];
-                bits[dst + 3] = 255;
-            }
-        }
-        let dim = bits.iter().map(|v| (v / 2) as u8).collect();
-        Img { w, h, bits, dim }
-    }
 
     pub struct Bg {
         pub w: i32,
@@ -387,59 +357,6 @@ mod imp {
                       bg.dim.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
     }
 
-    /// 按钮贴图绘制到指定矩形（button.bmp 153×31 缩放）
-    unsafe fn draw_btn(hdc: *mut c_void, img: &Img, r: (i32, i32, i32, i32), dim: bool) {
-        let bi = BITMAPINFOHEADER {
-            bi_size: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            bi_width: img.w,
-            bi_height: -img.h,
-            bi_planes: 1,
-            bi_bit_count: 32,
-            bi_compression: BI_RGB,
-            bi_size_image: 0,
-            bi_x_pels: 0,
-            bi_y_pels: 0,
-            bi_clr_used: 0,
-            bi_clr_important: 0,
-        };
-        let bits = if dim { &img.dim } else { &img.bits };
-        StretchDIBits(hdc, r.0, r.1, r.2 - r.0, r.3 - r.1, 0, 0, img.w, img.h,
-                      bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
-    }
-
-    /// 按钮双行文字（主标签 + 英文小字），带阴影，与选区窗同款
-    unsafe fn btn_label(hdc: *mut c_void, r: (i32, i32, i32, i32), main: &str, sub: &str,
-                        enabled: bool, f_main: *mut c_void, f_sub: *mut c_void) {
-        let (l, t, rr, b) = r;
-        let mid = t + (b - t) * 5 / 8;
-        let mut mc = RECT { left: l, top: t + 1, right: rr, bottom: mid + 1 };
-        let mut sc = RECT { left: l, top: mid, right: rr, bottom: b - 1 };
-        let mut m: Vec<u16> = main.encode_utf16().collect();
-        m.push(0);
-        let mut s: Vec<u16> = sub.encode_utf16().collect();
-        s.push(0);
-        SetBkMode(hdc, 1);
-        let body = if enabled { rgb(255, 252, 238) } else { rgb(150, 144, 132) };
-        // 主标签（阴影+主体）
-        SelectObject(hdc, f_main);
-        SetTextColor(hdc, rgb(12, 9, 6));
-        let mut sh = RECT { left: mc.left + 1, top: mc.top + 1, right: mc.right + 1, bottom: mc.bottom + 1 };
-        DrawTextW(hdc, m.as_ptr(), (m.len() - 1) as i32, &mut sh,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SetTextColor(hdc, body);
-        DrawTextW(hdc, m.as_ptr(), (m.len() - 1) as i32, &mut mc,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        // 英文小字
-        SelectObject(hdc, f_sub);
-        SetTextColor(hdc, rgb(12, 9, 6));
-        let mut sh2 = RECT { left: sc.left + 1, top: sc.top + 1, right: sc.right + 1, bottom: sc.bottom + 1 };
-        DrawTextW(hdc, s.as_ptr(), (s.len() - 1) as i32, &mut sh2,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        SetTextColor(hdc, body);
-        DrawTextW(hdc, s.as_ptr(), (s.len() - 1) as i32, &mut sc,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    }
-
     unsafe fn frame(hdc: *mut c_void, r: (i32, i32, i32, i32), color: u32) {
         let br = CreateSolidBrush(color);
         let rc = RECT { left: r.0, top: r.1, right: r.2, bottom: r.3 };
@@ -486,26 +403,14 @@ mod imp {
                 draw_status(hdc, &st.status, color, font);
                 DeleteObject(font);
 
-                // ---- 功能按钮层（底图原像素已抹平，这里用 button.bmp 画成真正的按钮）----
-                let btn = parse_img(BTN_BMP);
-                let ready = matches!(st.phase, Phase::Done | Phase::Failed);
-                let f_main = CreateFontW(-15, 0, 0, 0, 600, 0, 0, 0, 134, 0, 0, 5, 0,
-                                         wide("Microsoft YaHei").as_ptr());
-                let f_sub = CreateFontW(-9, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 5, 0,
-                                        wide("Microsoft YaHei").as_ptr());
-                draw_btn(hdc, &btn, BTN_START, !ready); // 未就绪时開始画暗态
-                draw_btn(hdc, &btn, BTN_CANCEL, false);
-                btn_label(hdc, BTN_START, "開始", "Start", ready, f_main, f_sub);
-                btn_label(hdc, BTN_CANCEL, "取消", "cancel", true, f_main, f_sub);
-                // hover 金色边框
+                // ---- 功能按钮：外观完全沿用底图原像素（严禁自造贴图）----
+                // 只叠 hover 提示框；按钮本体就是 bulletin.bmp 里烧死的原图
                 match HOVER.load(Ordering::Relaxed) {
-                    HOV_START if ready => frame(hdc, BTN_START, HOV_COLOR),
+                    HOV_START => frame(hdc, BTN_START, HOV_COLOR),
                     HOV_CANCEL => frame(hdc, BTN_CANCEL, HOV_COLOR),
                     HOV_CLOSE => frame(hdc, BTN_CLOSE, HOV_COLOR),
                     _ => {}
                 }
-                DeleteObject(f_main);
-                DeleteObject(f_sub);
                 EndPaint(h, &ps);
                 0
             }
