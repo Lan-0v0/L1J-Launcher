@@ -70,12 +70,13 @@ fn main() {
 
 #[cfg(windows)]
 fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
+    // 只设「目标值」，绘制值由 ui 的 33ms 定时器缓动追上去（这就是进度条动画）
     let set = |phase: Phase, cur: f32, ovr: f32, msg: String| {
         {
             let mut s = state.lock().unwrap();
             s.phase = phase;
-            s.current = cur;
-            s.overall = ovr;
+            s.target_current = cur;
+            s.target_overall = ovr;
             s.status = msg;
         }
         ui::notify();
@@ -121,9 +122,23 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
         &client,
         &mut container,
         &plan,
-        &mut |_desc, i, n| {
-            let p = if n == 0 { 0.0 } else { (i as f32) / (n as f32) };
-            set(Phase::Working, 0.0, p, "正在下載更新…".into());
+        &mut |desc, i, n, frac| {
+            // 蓝条 = 当前这一条的下载进度（字节级）；红条 = 总进度（含当前条的分数部分）
+            let ovr = if n == 0 {
+                0.0
+            } else {
+                ((i as f32) + frac) / (n as f32)
+            };
+            set(
+                Phase::Working,
+                frac,
+                ovr,
+                (if desc.is_empty() {
+                    "正在下載更新…".to_string()
+                } else {
+                    format!("正在下載更新… {}", desc)
+                }),
+            );
         },
     );
 
@@ -292,6 +307,7 @@ fn trim(s: &str, n: usize) -> String {
 }
 
 fn console_flow(cfg: &Config, client: &Path) {
+    use std::io::Write as _;
     let manifest = match update::fetch_and_verify(&cfg.update_base, &cfg.public_key) {
         Ok(m) => m,
         Err(e) => {
@@ -326,8 +342,13 @@ fn console_flow(cfg: &Config, client: &Path) {
         println!("已是最新。");
         return;
     }
-    match update::apply(&cfg.update_base, client, &mut c, &plan, &mut |d, i, n| {
-        println!("  [{}/{}] {}", i + 1, n, d)
+    match update::apply(&cfg.update_base, client, &mut c, &plan, &mut |d, i, n, frac| {
+        if frac <= 0.0 || frac >= 1.0 {
+            println!("  [{}/{}] {}", i + 1, n, d)
+        } else {
+            print!("\r  [{}/{}] {} {:.0}%   ", i + 1, n, d, frac * 100.0);
+            let _ = std::io::stdout().flush();
+        }
     }) {
         Ok(rep) => {
             println!(

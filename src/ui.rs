@@ -46,10 +46,13 @@ pub enum Phase {
 #[derive(Clone)]
 pub struct UiState {
     pub phase: Phase,
-    pub current: f32, // 目前進度 0..1
-    pub overall: f32, // 總進度 0..1
+    pub current: f32, // 目前進度（绘制值，由定时器向 target 缓动）
+    pub overall: f32, // 總進度（绘制值）
     pub status: String,
     pub version: String,
+    /// 目标值：工作线程只改这两个，绘制值自己追上去（缓动动画）
+    pub target_current: f32,
+    pub target_overall: f32,
 }
 
 impl Default for UiState {
@@ -60,8 +63,25 @@ impl Default for UiState {
             overall: 0.0,
             status: "正在檢查更新…".into(),
             version: String::new(),
+            target_current: 0.0,
+            target_overall: 0.0,
         }
     }
+}
+
+/// 缓动：绘制值朝目标值靠近（每帧 25%），足够近就吸附
+fn ease(cur: f32, tgt: f32) -> f32 {
+    let d = tgt - cur;
+    if d.abs() < 0.002 {
+        tgt
+    } else {
+        cur + d * 0.25
+    }
+}
+
+/// 是否处于「不确定」等待态：还在干活但完全没有进度信息 → 画来回流动的块
+fn is_indeterminate(st: &UiState) -> bool {
+    matches!(st.phase, Phase::Working) && st.target_current <= 0.0001 && st.target_overall <= 0.0001
 }
 
 pub type Shared = Arc<Mutex<UiState>>;
@@ -179,6 +199,8 @@ extern "system" {
     fn ReleaseDC(h: *mut c_void, dc: *mut c_void) -> i32;
     fn GetSystemMetrics(idx: i32) -> i32;
     fn InvalidateRect(h: *mut c_void, r: *const c_void, erase: i32) -> i32;
+    fn SetTimer(h: *mut c_void, id: usize, elapse: u32, proc: *mut c_void) -> usize;
+    fn KillTimer(h: *mut c_void, id: usize) -> i32;
     fn LoadCursorW(inst: *mut c_void, name: *const u16) -> *mut c_void;
     fn LoadIconW(inst: *mut c_void, name: *const u16) -> *mut c_void;
     fn SetCapture(h: *mut c_void) -> *mut c_void;
@@ -220,6 +242,7 @@ const WM_CLOSE: u32 = 0x0010;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_LBUTTONUP: u32 = 0x0202;
 const WM_MOUSEMOVE: u32 = 0x0200;
+const WM_TIMER: u32 = 0x0113;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
 const HTCAPTION: usize = 2;
 const WS_POPUP: u32 = 0x8000_0000;
@@ -310,6 +333,19 @@ mod imp {
                       bg.bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
     }
 
+    /// 「不确定」等待态：进度条里来回流动的一小段（三角波，左右往返）
+    unsafe fn draw_marquee(hdc: *mut c_void, y: i32, tick: usize) {
+        const PERIOD: usize = 72; // 帧
+        const SEG_W: i32 = 96;
+        let p = (tick % PERIOD) as f32 / PERIOD as f32;
+        let tri = if p < 0.5 { p * 2.0 } else { 2.0 - p * 2.0 }; // 0→1→0
+        let x = BAR_X + ((BAR_W - SEG_W) as f32 * tri) as i32;
+        for (i, c) in BLUE.iter().enumerate() {
+            let (r, g, b) = *c;
+            fill(hdc, x, y + i as i32, SEG_W, 1, rgb(r, g, b));
+        }
+    }
+
     unsafe fn draw_bar(hdc: *mut c_void, y: i32, pct: f32, pal: &[(u8, u8, u8); 8], dim: bool) {
         let p = pct.clamp(0.0, 1.0);
         let end = BAR_X + (BAR_W as f32 * p) as i32;
@@ -367,6 +403,10 @@ mod imp {
 
     // hover 目标编码：0=无 1=開始 2=取消 3=X
     static HOVER: AtomicUsize = AtomicUsize::new(0);
+    // 动画帧计数（33ms 一帧，由 WM_TIMER 推进）
+    static TICK: AtomicUsize = AtomicUsize::new(0);
+    const TIMER_ID: usize = 1;
+    const FRAME_MS: u32 = 33;
     const HOV_START: usize = 1;
     const HOV_CANCEL: usize = 2;
     const HOV_CLOSE: usize = 3;
@@ -394,7 +434,12 @@ mod imp {
 
                 let st = crate::ui::STATE.get().map(|s| s.lock().unwrap().clone()).unwrap_or_default();
                 let dim = !matches!(st.phase, Phase::Done | Phase::Failed);
-                draw_bar(hdc, BAR1_Y, st.current, &BLUE, false);
+                // 蓝条：有进度画实心，无进度（等待服务器）画来回流动的块
+                if is_indeterminate(&st) {
+                    draw_marquee(hdc, BAR1_Y, TICK.load(Ordering::Relaxed));
+                } else {
+                    draw_bar(hdc, BAR1_Y, st.current, &BLUE, false);
+                }
                 draw_bar(hdc, BAR2_Y, st.overall, &RED, false);
                 let _ = dim; // 方案B：不动「開始」的图，只在逻辑上禁用点击
 
@@ -413,6 +458,27 @@ mod imp {
                     _ => {}
                 }
                 EndPaint(h, &ps);
+                0
+            }
+            WM_TIMER => {
+                TICK.fetch_add(1, Ordering::Relaxed);
+                let mut dirty = false;
+                if let Some(sh) = crate::ui::STATE.get() {
+                    let mut s = sh.lock().unwrap();
+                    let c = ease(s.current, s.target_current);
+                    let o = ease(s.overall, s.target_overall);
+                    if (c - s.current).abs() > 0.0001 || (o - s.overall).abs() > 0.0001 {
+                        s.current = c;
+                        s.overall = o;
+                        dirty = true;
+                    }
+                    if is_indeterminate(&s) {
+                        dirty = true; // 流动动画每帧都要重画
+                    }
+                }
+                if dirty {
+                    InvalidateRect(h, std::ptr::null(), 0);
+                }
                 0
             }
             WM_MOUSEMOVE => {
@@ -462,6 +528,7 @@ mod imp {
                 0
             }
             WM_DESTROY => {
+                KillTimer(h, TIMER_ID);
                 PostQuitMessage(0);
                 0
             }
@@ -507,6 +574,7 @@ mod imp {
             return 1;
         }
         let _ = crate::ui::HWND_G.set(hwnd as usize);
+        SetTimer(hwnd, TIMER_ID, FRAME_MS, std::ptr::null_mut()); // 33ms 一帧的动画心跳
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
 

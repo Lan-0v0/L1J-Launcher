@@ -9,7 +9,15 @@ use std::ffi::c_void;
 pub const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: u32 = 0;
 pub const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
 pub const WINHTTP_QUERY_STATUS_CODE: u32 = 19;
+pub const WINHTTP_QUERY_CONTENT_LENGTH: u32 = 5;
 pub const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
+
+/// 联网超时（毫秒）：解析 3s / 连接 3s / 发送 5s / 接收 5s
+/// 没有它，服务器不可达时 WinHTTP 会按系统默认超时干等（几十秒），界面卡在「正在檢查更新…」
+const T_RESOLVE: i32 = 3000;
+const T_CONNECT: i32 = 3000;
+const T_SEND: i32 = 5000;
+const T_RECEIVE: i32 = 5000;
 
 #[link(name = "winhttp")]
 extern "system" {
@@ -60,6 +68,14 @@ extern "system" {
         lpdw_number_of_bytes_read: *mut u32,
     ) -> i32;
     fn WinHttpCloseHandle(h_internet: *mut c_void) -> i32;
+    /// 超时（毫秒）：解析域名 / 建立连接 / 发送请求 / 接收响应
+    fn WinHttpSetTimeouts(
+        h_internet: *mut c_void,
+        resolve_timeout: i32,
+        connect_timeout: i32,
+        send_timeout: i32,
+        receive_timeout: i32,
+    ) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -104,7 +120,17 @@ extern "system" {
     fn GetLastError() -> u32;
 }
 
+/// 便捷版：只要数据，不要进度
 pub fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    get_with_progress(url, max_bytes, None::<&mut dyn FnMut(usize, usize)>)
+}
+
+/// 带进度回调的下载：`progress(已收字节, 总字节)`，总字节未知时为 0
+pub fn get_with_progress(
+    url: &str,
+    max_bytes: usize,
+    mut progress: Option<&mut dyn FnMut(usize, usize)>,
+) -> Result<Vec<u8>, String> {
     let (secure, host, port, path) = split_url(url)?;
     let agent = wide("l1j-launcher/0.1");
     let host_w = wide(&host);
@@ -122,6 +148,11 @@ pub fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         );
         if session.is_null() {
             return Err(last_error("WinHttpOpen 失败"));
+        }
+        // 必须显式设超时：否则服务器不可达时会无限期等待（界面假死）
+        if WinHttpSetTimeouts(session, T_RESOLVE, T_CONNECT, T_SEND, T_RECEIVE) == 0 {
+            // 设超时失败不致命，继续（只是退回系统默认）
+            let _ = GetLastError();
         }
 
         let mut conn: *mut c_void = std::ptr::null_mut();
@@ -177,8 +208,26 @@ pub fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
                 return Err(format!("HTTP {} : {}", status, url));
             }
 
+            // 总长度（可能没有 Content-Length，此时为 0 → 回调拿到 0 表示未知）
+            let mut total: u32 = 0;
+            let mut tlen = std::mem::size_of::<u32>() as u32;
+            if WinHttpQueryHeaders(
+                req,
+                WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                &mut total as *mut _ as *mut c_void,
+                &mut tlen,
+                std::ptr::null_mut(),
+            ) == 0
+            {
+                total = 0;
+            }
+
             let mut out: Vec<u8> = Vec::new();
             let mut buf = vec![0u8; 64 * 1024];
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(0, total as usize);
+            }
             loop {
                 let mut read: u32 = 0;
                 if WinHttpReadData(
@@ -197,6 +246,12 @@ pub fn get(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
                 if out.len() > max_bytes {
                     return Err(format!("响应超过上限 {} 字节", max_bytes));
                 }
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(out.len(), total as usize);
+                }
+            }
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(out.len(), total as usize);
             }
             Ok(out)
         })();

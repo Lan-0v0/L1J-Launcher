@@ -99,13 +99,13 @@ pub fn plan(m: &Manifest, c: &Container) -> Plan {
     }
 }
 
-/// 下载 + 校验 + 合并 + 保存。progress(描述, 已完成, 总数)
+/// 下载 + 校验 + 合并 + 保存。progress(描述, 已完成条目数, 总条目数, 当前条目下载进度 0..1)
 pub fn apply(
     base: &str,
     client: &Path,
     c: &mut Container,
     plan: &Plan,
-    progress: &mut dyn FnMut(&str, usize, usize),
+    progress: &mut dyn FnMut(&str, usize, usize, f32),
 ) -> Result<l1pak::Report, String> {
     let base = if base.ends_with('/') {
         base.to_string()
@@ -116,9 +116,17 @@ pub fn apply(
     let mut patches: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let total = plan.to_download.len();
     for (i, e) in plan.to_download.iter().enumerate() {
-        progress(&format!("下载 {}", e.name), i, total);
+        progress(&format!("下载 {}", e.name), i, total, 0.0);
         let url = format!("{}text/{}", base, url_encode(&e.name));
-        let data = http::get(&url, MAX_ENTRY)?;
+        let desc = format!("下载 {}", e.name);
+        let data = http::get_with_progress(&url, MAX_ENTRY, Some(&mut |got: usize, t: usize| {
+            let frac = if t > 0 {
+                (got as f32 / t as f32).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            progress(&desc, i, total, frac);
+        }))?;
         if data.len() as u64 != e.size {
             return Err(format!(
                 "条目大小不符 {}: 期望 {} 实际 {}",
@@ -143,7 +151,7 @@ pub fn apply(
     let _ = std::fs::copy(client.join("Text.pak"), bdir.join("Text.pak.bak"));
     let _ = std::fs::copy(client.join("Text.idx"), bdir.join("Text.idx.bak"));
 
-    progress("合并到 Text.pak", total, total);
+    progress("合并到 Text.pak", total, total, 1.0);
     let rep = c.replace(&patches)?;
     c.save(client)
         .map_err(|e| format!("保存容器失败: {}", e))?;
