@@ -7,6 +7,9 @@
 
 #![cfg(windows)]
 use std::ffi::c_void;
+use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 pub const W: i32 = 692;
 pub const H: i32 = 460;
@@ -16,6 +19,8 @@ pub struct Server {
     pub name: String,
     pub ip: String,
     pub enabled: bool,
+    /// 真实 ping 用的端口（缺省 2000）
+    pub port: Option<u16>,
 }
 
 const PLATE_W: i32 = 153;
@@ -104,6 +109,8 @@ extern "system" {
     fn ReleaseCapture() -> i32;
     fn SendMessageW(h: *mut c_void, m: u32, w: usize, l: isize) -> isize;
     fn DrawTextW(dc: *mut c_void, text: *const u16, len: i32, rc: *mut RECT, fmt: u32) -> i32;
+    fn PostMessageW(h: *mut c_void, m: u32, w: usize, l: isize) -> i32;
+    fn InvalidateRect(h: *mut c_void, rc: *const RECT, erase: i32) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -133,8 +140,7 @@ const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
-const HTCAPTION: usize = 2;
-const WS_POPUP: u32 = 0x8000_0000;
+const HTCAPTION: usize = 2;const WS_POPUP: u32 = 0x8000_0000;
 const SW_SHOW: i32 = 5;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
@@ -148,6 +154,57 @@ const DIB_RGB_COLORS: u32 = 0;
 
 static BG_BMP: &[u8] = include_bytes!("../assets/serverlist.bmp");
 static BTN_BMP: &[u8] = include_bytes!("../assets/button.bmp");
+
+// ---- 真实 Ping ----
+// 后台线程对每个 enabled 区做 TCP connect，结果写入原子数组后 PostMessage 触发重绘。
+const WM_APP_PING: u32 = 0x8000 + 1; // w_param = 区索引
+const PING_CHECKING: u8 = 0;
+const PING_OK: u8 = 1;
+const PING_FAIL: u8 = 2;
+const PING_TIMEOUT_MS: u64 = 800;
+const MAX_SRV: usize = 8;
+
+#[allow(clippy::declare_interior_mutable_const)]
+const A8_ZERO: AtomicU8 = AtomicU8::new(PING_CHECKING);
+#[allow(clippy::declare_interior_mutable_const)]
+const A32_ZERO: AtomicU32 = AtomicU32::new(0);
+static PINGS: [AtomicU8; MAX_SRV] = [A8_ZERO; MAX_SRV];
+static PING_MS: [AtomicU32; MAX_SRV] = [A32_ZERO; MAX_SRV];
+
+fn ping_state(i: usize) -> (u8, u32) {
+    if i >= MAX_SRV {
+        return (PING_CHECKING, 0);
+    }
+    (PINGS[i].load(Ordering::Relaxed), PING_MS[i].load(Ordering::Relaxed))
+}
+
+/// 逐区一个线程并行探测；完成后 PostMessage 让主线程重绘
+/// （hwnd 以 usize 传递：*mut c_void 不能直接跨线程）
+fn spawn_pings(hwnd: usize, targets: Vec<(usize, String, Option<u16>)>) {
+    for (idx, ip, port) in targets {
+        std::thread::spawn(move || unsafe {
+            let hwnd = hwnd as *mut c_void;
+            let addr: SocketAddr = match format!("{}:{}", ip, port.unwrap_or(2000)).parse() {
+                Ok(a) => a,
+                Err(_) => {
+                    if idx < MAX_SRV {
+                        PINGS[idx].store(PING_FAIL, Ordering::Relaxed);
+                        PostMessageW(hwnd, WM_APP_PING, idx, 0);
+                    }
+                    return;
+                }
+            };
+            let t0 = Instant::now();
+            let ok = TcpStream::connect_timeout(&addr, Duration::from_millis(PING_TIMEOUT_MS)).is_ok();
+            let ms = t0.elapsed().as_millis() as u32;
+            if idx < MAX_SRV {
+                PINGS[idx].store(if ok { PING_OK } else { PING_FAIL }, Ordering::Relaxed);
+                PING_MS[idx].store(ms, Ordering::Relaxed);
+                PostMessageW(hwnd, WM_APP_PING, idx, 0);
+            }
+        });
+    }
+}
 
 struct Img {
     w: i32,
@@ -179,7 +236,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn rgb(r: u8, g: u8, b: u8) -> u32 {
+const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
@@ -230,16 +287,32 @@ unsafe fn fill_circle(hdc: *mut c_void, cx: i32, cy: i32, r: i32, color: u32) {
     DeleteObject(br);
 }
 
-/// 状态圆点：暗边 -> 亮色主体 -> 左上高光（直径 16px，真正的圆形）
-unsafe fn dot(hdc: *mut c_void, cx: i32, cy: i32, on: bool) {
-    if on {
-        fill_circle(hdc, cx, cy, 8, rgb(24, 96, 38));
-        fill_circle(hdc, cx, cy, 7, rgb(74, 226, 96));
-        fill_circle(hdc, cx - 2, cy - 2, 2, rgb(224, 255, 214));
-    } else {
-        fill_circle(hdc, cx, cy, 8, rgb(58, 54, 50));
-        fill_circle(hdc, cx, cy, 7, rgb(132, 128, 122));
-        fill_circle(hdc, cx - 2, cy - 2, 2, rgb(180, 176, 170));
+/// 状态圆点三态+探测中：暗边 -> 亮色主体 -> 左上高光（直径 16px，真正的圆形）
+unsafe fn dot(hdc: *mut c_void, cx: i32, cy: i32, color: u32) {
+    fill_circle(hdc, cx, cy, 8, rgb(24, 24, 22));
+    fill_circle(hdc, cx, cy, 7, color);
+    fill_circle(hdc, cx - 2, cy - 2, 2, rgb(224, 255, 214));
+}
+
+const DOT_GREEN: u32 = rgb(74, 226, 96);   // 通，快
+const DOT_YELLOW: u32 = rgb(232, 200, 60); // 通，慢
+const DOT_RED: u32 = rgb(230, 80, 70);     // 超时/拒绝
+const DOT_CHECK: u32 = rgb(120, 130, 145); // 探测中
+const DOT_GRAY: u32 = rgb(132, 128, 122);  // enabled=false
+
+/// 根据枚举与 ping 结果返回（圆点颜色，名字后缀）
+fn dot_and_suffix(enabled: bool, i: usize) -> (u32, String) {
+    if !enabled {
+        return (DOT_GRAY, String::new());
+    }
+    let (st, ms) = ping_state(i);
+    match st {
+        PING_OK => {
+            let c = if ms < 150 { DOT_GREEN } else { DOT_YELLOW };
+            (c, format!(" ({}ms)", ms))
+        }
+        PING_FAIL => (DOT_RED, " (超时)".to_string()),
+        _ => (DOT_CHECK, String::new()),
     }
 }
 
@@ -261,7 +334,9 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     let (x, y) = plate_rect(i, n);
                     draw_img(hdc, &btn, x, y);
                     let mut rc = RECT { left: x, top: y, right: x + PLATE_W, bottom: y + PLATE_H };
-                    let mut name: Vec<u16> = srv.name.encode_utf16().collect();
+                    let (dot_c, suffix) = dot_and_suffix(srv.enabled, i);
+                    let label = format!("{}{}", srv.name, suffix);
+                    let mut name: Vec<u16> = label.encode_utf16().collect();
                     name.push(0);
                     SelectObject(hdc, font);
                     SetTextColor(hdc, rgb(12, 9, 6));
@@ -272,7 +347,7 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     DrawTextW(hdc, name.as_ptr(), (name.len() - 1) as i32, &mut rc,
                               DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
                     let cx = if n <= 1 { x - 16 } else if i % 2 == 0 { x - 16 } else { x + PLATE_W + 16 };
-                    dot(hdc, cx, y + PLATE_H / 2, srv.enabled);
+                    dot(hdc, cx, y + PLATE_H / 2, dot_c);
                 }
             }
             DeleteObject(font);
@@ -307,6 +382,11 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     SendMessageW(h, WM_NCLBUTTONDOWN, HTCAPTION, 0);
                 }
             }
+            0
+        }
+        WM_APP_PING => {
+            // 某个区的 ping 结果回来了：整窗重绘（窗口小，代价可忽略）
+            InvalidateRect(h, std::ptr::null(), 0);
             0
         }
         WM_CLOSE | WM_DESTROY => {
@@ -359,6 +439,19 @@ unsafe fn run(servers: Vec<Server>) -> Option<usize> {
     }
     ShowWindow(hwnd, SW_SHOW);
     UpdateWindow(hwnd);
+
+    // 后台真实 ping：enabled 的区逐区一线程，探测完 PostMessage 重绘
+    let targets: Vec<(usize, String, Option<u16>)> = st
+        .as_ref()
+        .unwrap()
+        .servers
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.enabled)
+        .map(|(i, s)| (i, s.ip.clone(), s.port))
+        .collect();
+    spawn_pings(hwnd as usize, targets);
+
     let mut msg: MSG = std::mem::zeroed();
     while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
         TranslateMessage(&msg);

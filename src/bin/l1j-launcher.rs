@@ -174,8 +174,6 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
             let pick = cfg.servers.iter().position(|x| x.enabled).unwrap_or(0);
             let sv = &cfg.servers[pick];
             sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
-            let _ = std::fs::write(client.join("target.txt"),
-                format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
 
             l1j_launcher::launch::set_real_server(&format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
             if let Some(blob) = sv.server_data.as_deref() {
@@ -202,6 +200,7 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                     name: s.name.clone(),
                     ip: s.ip.clone(),
                     enabled: s.enabled,
+                    port: s.port,
                 })
                 .collect();
             return match l1j_launcher::select::select(list) {
@@ -228,8 +227,6 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                             }
                         }
                     }
-                    let _ = std::fs::write(client.join("target.txt"),
-                        format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
 
                     launch::set_real_server(&format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
                     if let Some(blob) = sv.server_data.as_deref() {

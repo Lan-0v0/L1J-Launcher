@@ -1,0 +1,4 @@
+# 32 位交叉编译配置：链接器用本地 MinGW-w64 i686（D:\l1log\tc\mingw32）
+# 注意：构建时 PATH 需前置该目录（ar 等工具依赖），且仓库不能放在含中文的路径下（GNU ld 处理不了）
+[target.i686-pc-windows-gnu]
+linker = "D:/l1log/tc/mingw32/bin/gcc.exe"
