@@ -357,19 +357,18 @@ const DOT_RED: u32 = rgb(230, 80, 70);     // 超时/拒绝
 const DOT_CHECK: u32 = rgb(120, 130, 145); // 探测中
 const DOT_GRAY: u32 = rgb(132, 128, 122);  // enabled=false
 
-/// 根据枚举与 ping 结果返回（圆点颜色，名字后缀）
-fn dot_and_suffix(enabled: bool, i: usize) -> (u32, String) {
+/// 只返回圆点颜色（区名保持纯净，不追加任何延迟/超时后缀）
+fn dot_color(enabled: bool, i: usize) -> u32 {
     if !enabled {
-        return (DOT_GRAY, String::new());
+        return DOT_GRAY;
     }
     let (st, ms) = ping_state(i);
     match st {
         PING_OK => {
-            let c = if ms < 150 { DOT_GREEN } else { DOT_YELLOW };
-            (c, format!(" ({}ms)", ms))
+            if ms < 150 { DOT_GREEN } else { DOT_YELLOW }
         }
-        PING_FAIL => (DOT_RED, " (超时)".to_string()),
-        _ => (DOT_CHECK, String::new()),
+        PING_FAIL => DOT_RED,
+        _ => DOT_CHECK,
     }
 }
 
@@ -391,9 +390,8 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     let (x, y) = plate_rect(i, n);
                     draw_img(hdc, &btn, x, y);
                     let mut rc = RECT { left: x, top: y, right: x + PLATE_W, bottom: y + PLATE_H };
-                    let (dot_c, suffix) = dot_and_suffix(srv.enabled, i);
-                    let label = format!("{}{}", srv.name, suffix);
-                    let mut name: Vec<u16> = label.encode_utf16().collect();
+                    let dot_c = dot_color(srv.enabled, i);
+                    let mut name: Vec<u16> = srv.name.encode_utf16().collect();
                     name.push(0);
                     SelectObject(hdc, font);
                     SetTextColor(hdc, rgb(12, 9, 6));
