@@ -441,6 +441,29 @@ pub fn launch_game_with_args(client: &Path, exe_name: &str, args: &str) -> Resul
     { let _ = (client, exe_name, args); Err("仅支持 Windows".into()) }
 }
 
+/// 把选中区的 IP/端口写入 lineage.cfg（游戏真正读取的连接配置，明文 tag 结构）
+/// 结构实证：tag7(DWORD)=IP，tag8(DWORD)=端口，即 "...07 00 00 00 | 04 00 00 00 | IP" / "...08 00 00 00 | 04 00 00 00 | PORT"
+pub fn apply_lineage_cfg(client: &Path, ip: &str, port: u16) -> Result<(), String> {
+    let p = client.join("lineage.cfg");
+    let mut d = std::fs::read(&p).map_err(|e| format!("读 lineage.cfg: {}（首次运行请先用旧登录器跑一次）", e))?;
+    let mut oct = [0u8; 4];
+    for (i, part) in ip.split('.').enumerate() {
+        if i >= 4 { return Err("IP 格式错误".into()); }
+        oct[i] = part.parse::<u8>().map_err(|_| "IP 格式错误")?;
+    }
+    let t7 = [0x07u8, 0, 0, 0, 0x04, 0, 0, 0];
+    let t8 = [0x08u8, 0, 0, 0, 0x04, 0, 0, 0];
+    let find = |hay: &[u8], pat: &[u8], from: usize| -> Option<usize> {
+        (from..=hay.len().saturating_sub(8)).find(|&i| &hay[i..i + 8] == pat)
+    };
+    let p7 = find(&d, &t7, 0).ok_or("lineage.cfg 找不到 IP 条目(tag7)")?;
+    d[p7 + 8..p7 + 12].copy_from_slice(&oct);
+    let p8 = find(&d, &t8, p7).ok_or("lineage.cfg 找不到端口条目(tag8)")?;
+    d[p8 + 8..p8 + 12].copy_from_slice(&(port as u32).to_le_bytes());
+    std::fs::write(&p, &d).map_err(|e| format!("写 lineage.cfg: {}", e))?;
+    Ok(())
+}
+
 /// 把选中区的 ServerData 写进客户端 Login.ini（游戏启动时自己读取并解密）
 pub fn apply_server_data(client: &Path, blob: &str) -> Result<(), String> {
     let ini = client.join("Login.ini");

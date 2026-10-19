@@ -9,9 +9,12 @@ pub struct ServerCfg {
     pub ip: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Encode 预生成的 ServerData（Base64）。启动前写入客户端 Login.ini，游戏据此连接
+    /// Encode 预生成的 ServerData（Base64）。仅供旧厂商登录器链路，自研链路不用
     #[serde(default)]
     pub server_data: Option<String>,
+    /// 游戏端口（默认 2000）。启动前写入 lineage.cfg（游戏从这里读连接地址，明文）
+    #[serde(default)]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
