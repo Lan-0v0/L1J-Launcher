@@ -1,12 +1,14 @@
 //! 原生更新窗口（GDI 绘制，无第三方 UI 库）
 //!
-//! 底图 = 客户端 `skin\Bulletin.bmp` 的预处理版（洋红透明键已填、进度条已擦空）
+//! 底图 = 客户端 `skin\Bulletin.bmp` 的预处理版（洋红透明键已填、进度条已擦空、
+//!   開始/取消原像素已抹平 → 现由代码用 button.bmp 绘制成真正的按钮层，原图备份
+//!   E:\天堂归档\20261020_清理\bulletin.bmp.原图）
 //! 布局实测（692×460）：
 //!   蓝条「目前進度」 x=105..470 y=407..414
 //!   红条「總進度」   x=105..470 y=424..431
 //!   状态文字区       x=106..472 y=386..404（进度条正上方，公告栏不动）
-//!   開始按钮         x=569..666 y=366..413
-//!   取消按钮         x=569..666 y=414..447
+//!   開始按钮         x=570..663 y=370..411（绘制矩形 = 命中矩形）
+//!   取消按钮         x=570..663 y=416..446
 
 #![cfg(windows)]
 use std::ffi::c_void;
@@ -20,9 +22,10 @@ const BAR_W: i32 = 366;
 const BAR1_Y: i32 = 407;
 const BAR2_Y: i32 = 424;
 const STATUS_RECT: (i32, i32, i32, i32) = (176, 386, 560, 404);
-const BTN_START: (i32, i32, i32, i32) = (569, 366, 666, 413);
-const BTN_CANCEL: (i32, i32, i32, i32) = (569, 414, 666, 447);
-const BTN_CLOSE: (i32, i32, i32, i32) = (670, 2, 692, 24); // 皮肤右上角那个小 X
+const BTN_START: (i32, i32, i32, i32) = (570, 370, 663, 411); // 93x41
+const BTN_CANCEL: (i32, i32, i32, i32) = (570, 416, 663, 446); // 93x30
+// 右上角 X 是底图自带的浮雕方块（周围是顶部装饰条，重画更差），保留原像素，只加热区
+const BTN_CLOSE: (i32, i32, i32, i32) = (664, 2, 692, 28);
 
 const BLUE: [(u8, u8, u8); 8] = [
     (165, 215, 239), (107, 162, 231), (107, 162, 231), (49, 109, 198),
@@ -74,7 +77,7 @@ pub fn notify() {
     }
 }
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 static CANCELED: AtomicBool = AtomicBool::new(false);
 static START_CLICKED: AtomicBool = AtomicBool::new(false);
 
@@ -200,6 +203,7 @@ extern "system" {
     fn StretchDIBits(dc: *mut c_void, xd: i32, yd: i32, wd: i32, hd: i32,
                      xs: i32, ys: i32, ws: i32, hs: i32,
                      bits: *const c_void, bi: *const BITMAPINFOHEADER, usage: u32, rop: u32) -> i32;
+    fn FrameRect(dc: *mut c_void, rc: *const RECT, brush: *mut c_void) -> i32;
     fn CreateBitmap(w: i32, h: i32, planes: u32, bits: u32, data: *const c_void) -> *mut c_void;
     fn CreatePatternBrush(bmp: *mut c_void) -> *mut c_void;
 }
@@ -223,6 +227,7 @@ const SW_SHOW: i32 = 5;
 const CS_HREDRAW: u32 = 0x0002;
 const CS_VREDRAW: u32 = 0x0001;
 const DT_LEFT: u32 = 0x0000;
+const DT_CENTER: u32 = 0x0001;
 const DT_VCENTER: u32 = 0x0004;
 const DT_SINGLELINE: u32 = 0x0020;
 const DT_NOPREFIX: u32 = 0x0800;
@@ -235,6 +240,36 @@ mod imp {
 
     // 底图（BMP，24bpp，54 字节头）
     static BG_BMP: &[u8] = include_bytes!("../assets/bulletin.bmp");
+    // 按钮贴图（与选区窗同一张，153×31）
+    static BTN_BMP: &[u8] = include_bytes!("../assets/button.bmp");
+
+    pub struct Img {
+        pub w: i32,
+        pub h: i32,
+        pub bits: Vec<u8>,    // BGRA 自顶向下
+        pub dim: Vec<u8>,     // 50% 暗化副本（禁用态）
+    }
+
+    pub fn parse_img(d: &[u8]) -> Img {
+        let off = u32::from_le_bytes([d[10], d[11], d[12], d[13]]) as usize;
+        let w = i32::from_le_bytes([d[18], d[19], d[20], d[21]]);
+        let h = i32::from_le_bytes([d[22], d[23], d[24], d[25]]).abs();
+        let stride = ((w as usize * 3 + 3) / 4) * 4;
+        let mut bits = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h as usize {
+            let src_y = h as usize - 1 - y;
+            for x in 0..w as usize {
+                let s = off + src_y * stride + x * 3;
+                let dst = (y * w as usize + x) * 4;
+                bits[dst] = d[s];
+                bits[dst + 1] = d[s + 1];
+                bits[dst + 2] = d[s + 2];
+                bits[dst + 3] = 255;
+            }
+        }
+        let dim = bits.iter().map(|v| (v / 2) as u8).collect();
+        Img { w, h, bits, dim }
+    }
 
     pub struct Bg {
         pub w: i32,
@@ -275,7 +310,7 @@ mod imp {
         s.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    fn rgb(r: u8, g: u8, b: u8) -> u32 {
+    const fn rgb(r: u8, g: u8, b: u8) -> u32 {
         (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
     }
 
@@ -352,6 +387,85 @@ mod imp {
                       bg.dim.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
     }
 
+    /// 按钮贴图绘制到指定矩形（button.bmp 153×31 缩放）
+    unsafe fn draw_btn(hdc: *mut c_void, img: &Img, r: (i32, i32, i32, i32), dim: bool) {
+        let bi = BITMAPINFOHEADER {
+            bi_size: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            bi_width: img.w,
+            bi_height: -img.h,
+            bi_planes: 1,
+            bi_bit_count: 32,
+            bi_compression: BI_RGB,
+            bi_size_image: 0,
+            bi_x_pels: 0,
+            bi_y_pels: 0,
+            bi_clr_used: 0,
+            bi_clr_important: 0,
+        };
+        let bits = if dim { &img.dim } else { &img.bits };
+        StretchDIBits(hdc, r.0, r.1, r.2 - r.0, r.3 - r.1, 0, 0, img.w, img.h,
+                      bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
+    }
+
+    /// 按钮双行文字（主标签 + 英文小字），带阴影，与选区窗同款
+    unsafe fn btn_label(hdc: *mut c_void, r: (i32, i32, i32, i32), main: &str, sub: &str,
+                        enabled: bool, f_main: *mut c_void, f_sub: *mut c_void) {
+        let (l, t, rr, b) = r;
+        let mid = t + (b - t) * 5 / 8;
+        let mut mc = RECT { left: l, top: t + 1, right: rr, bottom: mid + 1 };
+        let mut sc = RECT { left: l, top: mid, right: rr, bottom: b - 1 };
+        let mut m: Vec<u16> = main.encode_utf16().collect();
+        m.push(0);
+        let mut s: Vec<u16> = sub.encode_utf16().collect();
+        s.push(0);
+        SetBkMode(hdc, 1);
+        let body = if enabled { rgb(255, 252, 238) } else { rgb(150, 144, 132) };
+        // 主标签（阴影+主体）
+        SelectObject(hdc, f_main);
+        SetTextColor(hdc, rgb(12, 9, 6));
+        let mut sh = RECT { left: mc.left + 1, top: mc.top + 1, right: mc.right + 1, bottom: mc.bottom + 1 };
+        DrawTextW(hdc, m.as_ptr(), (m.len() - 1) as i32, &mut sh,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SetTextColor(hdc, body);
+        DrawTextW(hdc, m.as_ptr(), (m.len() - 1) as i32, &mut mc,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        // 英文小字
+        SelectObject(hdc, f_sub);
+        SetTextColor(hdc, rgb(12, 9, 6));
+        let mut sh2 = RECT { left: sc.left + 1, top: sc.top + 1, right: sc.right + 1, bottom: sc.bottom + 1 };
+        DrawTextW(hdc, s.as_ptr(), (s.len() - 1) as i32, &mut sh2,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SetTextColor(hdc, body);
+        DrawTextW(hdc, s.as_ptr(), (s.len() - 1) as i32, &mut sc,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    unsafe fn frame(hdc: *mut c_void, r: (i32, i32, i32, i32), color: u32) {
+        let br = CreateSolidBrush(color);
+        let rc = RECT { left: r.0, top: r.1, right: r.2, bottom: r.3 };
+        FrameRect(hdc, &rc, br);
+        DeleteObject(br);
+    }
+
+    // hover 目标编码：0=无 1=開始 2=取消 3=X
+    static HOVER: AtomicUsize = AtomicUsize::new(0);
+    const HOV_START: usize = 1;
+    const HOV_CANCEL: usize = 2;
+    const HOV_CLOSE: usize = 3;
+    const HOV_COLOR: u32 = rgb(255, 226, 130);
+
+    fn hit_code(x: i32, y: i32) -> usize {
+        if hit(BTN_CLOSE, x, y) {
+            HOV_CLOSE
+        } else if hit(BTN_CANCEL, x, y) {
+            HOV_CANCEL
+        } else if hit(BTN_START, x, y) {
+            HOV_START
+        } else {
+            0
+        }
+    }
+
     unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize) -> isize {
         match msg {
             WM_PAINT => {
@@ -371,31 +485,67 @@ mod imp {
                 let color = if matches!(st.phase, Phase::Failed) { rgb(232, 120, 108) } else { rgb(216, 185, 106) };
                 draw_status(hdc, &st.status, color, font);
                 DeleteObject(font);
+
+                // ---- 功能按钮层（底图原像素已抹平，这里用 button.bmp 画成真正的按钮）----
+                let btn = parse_img(BTN_BMP);
+                let ready = matches!(st.phase, Phase::Done | Phase::Failed);
+                let f_main = CreateFontW(-15, 0, 0, 0, 600, 0, 0, 0, 134, 0, 0, 5, 0,
+                                         wide("Microsoft YaHei").as_ptr());
+                let f_sub = CreateFontW(-9, 0, 0, 0, 400, 0, 0, 0, 134, 0, 0, 5, 0,
+                                        wide("Microsoft YaHei").as_ptr());
+                draw_btn(hdc, &btn, BTN_START, !ready); // 未就绪时開始画暗态
+                draw_btn(hdc, &btn, BTN_CANCEL, false);
+                btn_label(hdc, BTN_START, "開始", "Start", ready, f_main, f_sub);
+                btn_label(hdc, BTN_CANCEL, "取消", "cancel", true, f_main, f_sub);
+                // hover 金色边框
+                match HOVER.load(Ordering::Relaxed) {
+                    HOV_START if ready => frame(hdc, BTN_START, HOV_COLOR),
+                    HOV_CANCEL => frame(hdc, BTN_CANCEL, HOV_COLOR),
+                    HOV_CLOSE => frame(hdc, BTN_CLOSE, HOV_COLOR),
+                    _ => {}
+                }
+                DeleteObject(f_main);
+                DeleteObject(f_sub);
                 EndPaint(h, &ps);
+                0
+            }
+            WM_MOUSEMOVE => {
+                let x = (lp & 0xFFFF) as i32;
+                let y = ((lp >> 16) & 0xFFFF) as i32;
+                let code = hit_code(x, y);
+                if HOVER.load(Ordering::Relaxed) != code {
+                    HOVER.store(code, Ordering::Relaxed);
+                    InvalidateRect(h, std::ptr::null(), 0);
+                }
                 0
             }
             WM_LBUTTONDOWN => {
                 let x = (lp & 0xFFFF) as i32;
                 let y = ((lp >> 16) & 0xFFFF) as i32;
-                if hit(BTN_CLOSE, x, y) {
-                    CANCELED.store(true, Ordering::Relaxed);
-                    DestroyWindow(h);
-                    PostQuitMessage(0);
-                } else if hit(BTN_CANCEL, x, y) {
-                    CANCELED.store(true, Ordering::Relaxed);
-                    DestroyWindow(h);
-                    PostQuitMessage(0);
-                } else if hit(BTN_START, x, y) {
-                    let st = crate::ui::STATE.get().map(|s| s.lock().unwrap().clone()).unwrap_or_default();
-                    if matches!(st.phase, Phase::Done | Phase::Failed) {
-                        START_CLICKED.store(true, Ordering::Relaxed);
+                match hit_code(x, y) {
+                    HOV_CLOSE => {
+                        CANCELED.store(true, Ordering::Relaxed);
                         DestroyWindow(h);
                         PostQuitMessage(0);
                     }
-                } else {
-                    // 拖动窗口
-                    ReleaseCapture();
-                    SendMessageW(h, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    HOV_CANCEL => {
+                        CANCELED.store(true, Ordering::Relaxed);
+                        DestroyWindow(h);
+                        PostQuitMessage(0);
+                    }
+                    HOV_START => {
+                        let st = crate::ui::STATE.get().map(|s| s.lock().unwrap().clone()).unwrap_or_default();
+                        if matches!(st.phase, Phase::Done | Phase::Failed) {
+                            START_CLICKED.store(true, Ordering::Relaxed);
+                            DestroyWindow(h);
+                            PostQuitMessage(0);
+                        }
+                    }
+                    _ => {
+                        // 拖动窗口
+                        ReleaseCapture();
+                        SendMessageW(h, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    }
                 }
                 0
             }
