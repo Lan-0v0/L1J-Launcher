@@ -161,7 +161,11 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
         }
         if cfg.dev_skip_select {
             let pick = cfg.servers.iter().position(|x| x.enabled).unwrap_or(0);
-            let _ = pick;
+            if let Some(blob) = cfg.servers[pick].server_data.as_deref() {
+                if let Err(e) = l1j_launcher::launch::apply_server_data(client, blob) {
+                    eprintln!("写入 Login.ini 失败: {}", e);
+                }
+            }
             return match cfg.launch_arg.as_deref() {
                 Some(a) if !a.trim().is_empty() => {
                     l1j_launcher::launch::launch_game_with_args(client, &cfg.game_exe, a.trim())
@@ -181,7 +185,14 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                 })
                 .collect();
             return match l1j_launcher::select::select(list) {
-                Some(i) => launch::launch_game_with_ip(client, &cfg.game_exe, &cfg.servers[i].ip),
+                Some(i) => {
+                    if let Some(blob) = cfg.servers[i].server_data.as_deref() {
+                        if let Err(e) = launch::apply_server_data(client, blob) {
+                            eprintln!("写入 Login.ini 失败: {}", e);
+                        }
+                    }
+                    launch::launch_game_with_ip(client, &cfg.game_exe, &cfg.servers[i].ip)
+                }
                 None => Err("未选择区服".into()),
             };
         }

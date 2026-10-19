@@ -441,6 +441,30 @@ pub fn launch_game_with_args(client: &Path, exe_name: &str, args: &str) -> Resul
     { let _ = (client, exe_name, args); Err("仅支持 Windows".into()) }
 }
 
+/// 把选中区的 ServerData 写进客户端 Login.ini（游戏启动时自己读取并解密）
+pub fn apply_server_data(client: &Path, blob: &str) -> Result<(), String> {
+    let ini = client.join("Login.ini");
+    let mut data = std::fs::read(&ini).map_err(|e| format!("读 Login.ini: {}", e))?;
+    let key = b"ServerData=";
+    let mut out: Vec<u8> = Vec::with_capacity(data.len() + blob.len());
+    let mut i = 0usize;
+    let mut replaced = false;
+    while i < data.len() {
+        if data[i..].starts_with(key) && !replaced {
+            out.extend_from_slice(key);
+            out.extend_from_slice(blob.as_bytes());
+            while i < data.len() && data[i] != b'\r' && data[i] != b'\n' { i += 1; }
+            replaced = true;
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    if !replaced { return Err("Login.ini 里没找到 ServerData=".into()); }
+    std::fs::write(&ini, &out).map_err(|e| format!("写 Login.ini: {}", e))?;
+    Ok(())
+}
+
 /// 设置真实服务器地址（用于本地转发）
 pub fn set_real_server(ip: &str) {
     #[cfg(windows)]

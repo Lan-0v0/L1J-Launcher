@@ -9,6 +9,9 @@ pub struct ServerCfg {
     pub ip: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Encode 预生成的 ServerData（Base64）。启动前写入客户端 Login.ini，游戏据此连接
+    #[serde(default)]
+    pub server_data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,11 +78,13 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
                 name: "龙潭天堂·一区".into(),
                 ip: "124.222.172.24".into(),
                 enabled: false, // 维护中
+                server_data: None,
             },
             ServerCfg {
                 name: "龙潭天堂·测试服".into(),
                 ip: "124.222.172.24".into(),
                 enabled: true,
+                server_data: None,
             },
         ],
         launch_arg: Some("2130706433".into()),
