@@ -212,9 +212,20 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                     {
                         let ini = if cfg.game_exe.to_lowercase().ends_with(".bin") { "Login.ini".to_string() }
                                   else { format!("{}.ini", std::path::Path::new(&cfg.game_exe).file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default()) };
-                        if client.join("servers.ini").is_file() {
-                            let _ = std::fs::copy(client.join("servers.ini"), client.join(&ini));
-                            sel_log(&format!("已写 {}（全部区服）", ini));
+                        if let Ok(tpl) = std::fs::read(client.join("servers.ini")) {
+                            // 按字节切块（区名是 GBK，绝不能转 UTF-8），只写被选中的那一块
+                            let key = b"[Server";
+                            let mut starts: Vec<usize> = Vec::new();
+                            let mut k = 0usize;
+                            while k + key.len() <= tpl.len() {
+                                if &tpl[k..k + key.len()] == key { starts.push(k); k += key.len(); }
+                                else { k += 1; }
+                            }
+                            if let Some(&st) = starts.get(i) {
+                                let end = starts.get(i + 1).copied().unwrap_or(tpl.len());
+                                let _ = std::fs::write(client.join(&ini), &tpl[st..end]);
+                                sel_log(&format!("已写 {}（仅第 {} 区）", ini, i + 1));
+                            }
                         }
                     }
                     let _ = std::fs::write(client.join("target.txt"),

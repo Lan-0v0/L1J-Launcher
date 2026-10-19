@@ -570,9 +570,14 @@ mod imp {
                 return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
             if !is_game {
-                // 中继：厂商解密出的 127.0.0.1:2000 → 转发到选中区
-                if let Some(t) = client_ip_hint() {
-                    start_local_proxy(&t);
+                // 直连模式：ini 由选区时写好（只含被选中的那一条）；缺失才兜底复制整份
+                {
+                    let stem = std::path::Path::new(exe_name).file_stem()
+                        .map(|v| v.to_string_lossy().to_string()).unwrap_or_default();
+                    let dst = client.join(format!("{}.ini", stem));
+                    if !dst.is_file() {
+                        if let Ok(t) = std::fs::read(client.join("servers.ini")) { let _ = std::fs::write(&dst, t); }
+                    }
                 }
                 if client.join("quiet.dll").is_file() {
                     let inj = inject_dll(pi.h_process, client, "quiet.dll");
