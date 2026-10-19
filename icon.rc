@@ -1,0 +1,2 @@
+// 应用图标：取自厂商 login_old.exe 的原生图标资源（128/48/32/24/16 五档 32bpp）
+1 ICON "assets/app.ico"

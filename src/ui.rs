@@ -180,6 +180,7 @@ extern "system" {
     fn GetSystemMetrics(idx: i32) -> i32;
     fn InvalidateRect(h: *mut c_void, r: *const c_void, erase: i32) -> i32;
     fn LoadCursorW(inst: *mut c_void, name: *const u16) -> *mut c_void;
+    fn LoadIconW(inst: *mut c_void, name: *const u16) -> *mut c_void;
     fn SetCapture(h: *mut c_void) -> *mut c_void;
     fn ReleaseCapture() -> i32;
     fn SendMessageW(h: *mut c_void, m: u32, w: usize, l: isize) -> isize;
@@ -485,12 +486,12 @@ mod imp {
             cb_cls_extra: 0,
             cb_wnd_extra: 0,
             h_instance: inst,
-            h_icon: std::ptr::null_mut(),
+            h_icon: LoadIconW(inst, 1 as *const u16), // 资源 id=1（build.rs 由 windres 嵌入）
             h_cursor: LoadCursorW(std::ptr::null_mut(), 32512 as *const u16),
             hbr_background: std::ptr::null_mut(),
             lpsz_menu_name: std::ptr::null(),
             lpsz_class_name: cls.as_ptr(),
-            h_icon_sm: std::ptr::null_mut(),
+            h_icon_sm: LoadIconW(inst, 1 as *const u16),
         };
         RegisterClassExW(&wc);
 
