@@ -111,6 +111,7 @@ extern "system" {
     fn DrawTextW(dc: *mut c_void, text: *const u16, len: i32, rc: *mut RECT, fmt: u32) -> i32;
     fn PostMessageW(h: *mut c_void, m: u32, w: usize, l: isize) -> i32;
     fn InvalidateRect(h: *mut c_void, rc: *const RECT, erase: i32) -> i32;
+    fn FrameRect(dc: *mut c_void, rc: *const RECT, brush: *mut c_void) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -138,6 +139,7 @@ extern "system" {
 const WM_DESTROY: u32 = 0x0002;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
+const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_NCLBUTTONDOWN: u32 = 0x00A1;
 const HTCAPTION: usize = 2;const WS_POPUP: u32 = 0x8000_0000;
@@ -155,9 +157,18 @@ const DIB_RGB_COLORS: u32 = 0;
 static BG_BMP: &[u8] = include_bytes!("../assets/serverlist.bmp");
 static BTN_BMP: &[u8] = include_bytes!("../assets/button.bmp");
 
-// ---- 背景图内嵌按钮热区（serverlist.bmp 实测像素：取消=396..500×414..447，X=666..690×2..26）----
-const CANCEL_RECT: (i32, i32, i32, i32) = (392, 408, 504, 452);
-const CLOSE_RECT: (i32, i32, i32, i32) = (660, 0, 692, 32);
+// ---- 功能按钮：绘制矩形 = 命中矩形（同一份常量，绝不出现两套坐标）----
+// 底图里原有的 Recover/取消 像素已抹平（assets/serverlist.bmp），这里用 button.bmp 画成真正的按钮层
+const BTN_RECOVER: (i32, i32, i32, i32) = (207, 415, 300, 445); // 93x30
+const BTN_CANCEL: (i32, i32, i32, i32) = (400, 415, 493, 445);  // 93x30
+// 右上角 X 是底图自带的浮雕方块（周围是纯黑带，重画反而更差），保留原像素，只加热区
+const BTN_CLOSE: (i32, i32, i32, i32) = (662, 2, 692, 28);
+
+// hover 目标编码：0..n-1 = 区服 i；1000+ = 功能按钮
+const HOV_RECOVER: usize = 1000;
+const HOV_CANCEL: usize = 1001;
+const HOV_CLOSE: usize = 1002;
+const HOV_COLOR: u32 = rgb(255, 226, 130);
 
 static QUIT: AtomicBool = AtomicBool::new(false);
 
@@ -291,6 +302,56 @@ unsafe fn draw_img(hdc: *mut c_void, img: &Img, x: i32, y: i32) {
                   img.bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
 }
 
+/// 绘制到指定尺寸（StretchDIBits 支持缩放，用于把 153x31 的 button.bmp 画成 93x30）
+unsafe fn draw_img_ex(hdc: *mut c_void, img: &Img, x: i32, y: i32, dw: i32, dh: i32) {
+    let bi = BITMAPINFOHEADER {
+        bi_size: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        bi_width: img.w,
+        bi_height: -img.h,
+        bi_planes: 1,
+        bi_bit_count: 32,
+        bi_compression: BI_RGB,
+        bi_size_image: 0,
+        bi_x_pels: 0,
+        bi_y_pels: 0,
+        bi_clr_used: 0,
+        bi_clr_important: 0,
+    };
+    StretchDIBits(hdc, x, y, dw, dh, 0, 0, img.w, img.h,
+                  img.bits.as_ptr() as *const c_void, &bi, DIB_RGB_COLORS, SRCCOPY);
+}
+
+/// hover 高亮边框
+unsafe fn frame(hdc: *mut c_void, r: (i32, i32, i32, i32), color: u32) {
+    let br = CreateSolidBrush(color);
+    let rc = RECT { left: r.0, top: r.1, right: r.2, bottom: r.3 };
+    FrameRect(hdc, &rc, br);
+    DeleteObject(br);
+}
+
+/// 命中测试：返回 hover/点击目标编码
+fn hit_test(st: Option<&SelectState>, x: i32, y: i32) -> Option<usize> {
+    if in_rect(BTN_CLOSE, x, y) {
+        return Some(HOV_CLOSE);
+    }
+    if in_rect(BTN_CANCEL, x, y) {
+        return Some(HOV_CANCEL);
+    }
+    if in_rect(BTN_RECOVER, x, y) {
+        return Some(HOV_RECOVER);
+    }
+    if let Some(s) = st {
+        let n = s.servers.len();
+        for i in 0..n {
+            let (px, py) = plate_rect(i, n);
+            if x >= px && x < px + PLATE_W && y >= py && y < py + PLATE_H {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
 unsafe fn fill_circle(hdc: *mut c_void, cx: i32, cy: i32, r: i32, color: u32) {
     let br = CreateSolidBrush(color);
     let old_b = SelectObject(hdc, br);
@@ -365,42 +426,71 @@ unsafe extern "system" fn wndproc(h: *mut c_void, msg: u32, wp: usize, lp: isize
                     dot(hdc, cx, y + PLATE_H / 2, dot_c);
                 }
             }
+            // ---- 底部功能按钮：真正的绘制层（底图原像素已抹平）----
+            for (rect, label, hov) in [
+                (BTN_RECOVER, "Recover", HOV_RECOVER),
+                (BTN_CANCEL, "取消", HOV_CANCEL),
+            ] {
+                draw_img_ex(hdc, &btn, rect.0, rect.1, rect.2 - rect.0, rect.3 - rect.1);
+                let mut rc = RECT { left: rect.0, top: rect.1, right: rect.2, bottom: rect.3 };
+                let mut t: Vec<u16> = label.encode_utf16().collect();
+                t.push(0);
+                SelectObject(hdc, font);
+                SetTextColor(hdc, rgb(12, 9, 6));
+                let mut sh = RECT { left: rc.left + 1, top: rc.top + 1, right: rc.right + 1, bottom: rc.bottom + 1 };
+                DrawTextW(hdc, t.as_ptr(), (t.len() - 1) as i32, &mut sh,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                SetTextColor(hdc, rgb(255, 252, 238));
+                DrawTextW(hdc, t.as_ptr(), (t.len() - 1) as i32, &mut rc,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                if st.as_ref().and_then(|s| s.hover) == Some(hov) {
+                    frame(hdc, rect, HOV_COLOR);
+                }
+            }
+            // X 保留底图像素，只叠 hover 边框
+            if st.as_ref().and_then(|s| s.hover) == Some(HOV_CLOSE) {
+                frame(hdc, BTN_CLOSE, HOV_COLOR);
+            }
             DeleteObject(font);
             EndPaint(h, &ps);
+            0
+        }
+        WM_MOUSEMOVE => {
+            let x = (lp & 0xFFFF) as i32;
+            let y = ((lp >> 16) & 0xFFFF) as i32;
+            let hov = hit_test(st.as_ref(), x, y);
+            if st.as_ref().and_then(|s| s.hover) != hov {
+                if let Some(s) = st.as_mut() {
+                    s.hover = hov;
+                }
+                InvalidateRect(h, std::ptr::null(), 0);
+            }
             0
         }
         WM_LBUTTONDOWN => {
             let x = (lp & 0xFFFF) as i32;
             let y = ((lp >> 16) & 0xFFFF) as i32;
-            // 右上角 X：关闭整个启动器
-            if in_rect(CLOSE_RECT, x, y) {
-                QUIT.store(true, Ordering::Relaxed);
-                DestroyWindow(h);
-                PostQuitMessage(0);
-                return 0;
-            }
-            // 取消：关闭选区窗，回到加载界面（picked 保持 None）
-            if in_rect(CANCEL_RECT, x, y) {
-                DestroyWindow(h);
-                PostQuitMessage(0);
-                return 0;
-            }
-            let mut hit = None;
-            if let Some(s) = st.as_ref() {
-                let n = s.servers.len();
-                for i in 0..n {
-                    let (px, py) = plate_rect(i, n);
-                    if x >= px && x < px + PLATE_W && y >= py && y < py + PLATE_H {
-                        hit = Some(i);
-                    }
+            match hit_test(st.as_ref(), x, y) {
+                Some(HOV_CLOSE) => {
+                    // 右上角 X：关闭整个启动器
+                    QUIT.store(true, Ordering::Relaxed);
+                    DestroyWindow(h);
+                    PostQuitMessage(0);
                 }
-            }
-            match hit {
+                Some(HOV_CANCEL) => {
+                    // 取消：关闭选区窗，回到加载界面（picked 保持 None）
+                    DestroyWindow(h);
+                    PostQuitMessage(0);
+                }
+                Some(HOV_RECOVER) => {
+                    // Recover 暂未绑定功能（占位）
+                }
                 Some(i) => {
                     let ok = st.as_ref().map(|s| s.servers[i].enabled).unwrap_or(false);
                     if ok {
-                        let s = st.as_mut().unwrap();
-                        s.picked = Some(i);
+                        if let Some(s) = st.as_mut() {
+                            s.picked = Some(i);
+                        }
                         DestroyWindow(h);
                         PostQuitMessage(0);
                     }
