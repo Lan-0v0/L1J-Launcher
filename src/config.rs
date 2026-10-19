@@ -28,6 +28,12 @@ pub struct Config {
     /// 额外运行期补丁，格式 "地址:原字节HEX:新字节HEX"（如 "4173DD:75:90"）
     #[serde(default)]
     pub extra_patches: Vec<String>,
+    /// 传给游戏主程序的参数（厂商实测为 2130706433）
+    #[serde(default)]
+    pub launch_arg: Option<String>,
+    /// 仅测试用：true 时自动选第一个可用区，不弹选区窗口（不影响 UI 配置）
+    #[serde(default)]
+    pub dev_skip_select: bool,
     /// 区服列表（>=2 个时启动前弹选区窗口）
     #[serde(default)]
     pub servers: Vec<ServerCfg>,
@@ -76,6 +82,8 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
                 enabled: true,
             },
         ],
+        launch_arg: Some("2130706433".into()),
+        dev_skip_select: false,
         launch_on_error: true,
         extra_patches: Vec::new(),
     };

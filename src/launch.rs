@@ -49,6 +49,9 @@ mod imp {
         fn WriteProcessMemory(p: *mut c_void, addr: *mut c_void, buf: *const c_void, n: usize, written: *mut usize) -> i32;
         fn VirtualProtectEx(p: *mut c_void, addr: *mut c_void, n: usize, newp: u32, old: *mut u32) -> i32;
         fn Sleep(ms: u32);
+        fn CreateFileMappingW(h: *mut c_void, sa: *mut c_void, prot: u32,
+                              hi: u32, lo: u32, name: *const u16) -> *mut c_void;
+        fn MapViewOfFile(h: *mut c_void, access: u32, hi: u32, lo: u32, n: usize) -> *mut c_void;
         fn CreateProcessW(
             app: *const u16,
             cmdline: *mut u16,
@@ -62,6 +65,14 @@ mod imp {
             pi: *mut PROCESS_INFORMATION,
         ) -> i32;
         fn CloseHandle(h: *mut c_void) -> i32;
+        fn VirtualAllocEx(h: *mut c_void, addr: *mut c_void, size: usize, typ: u32, prot: u32) -> *mut c_void;
+        fn CreateRemoteThread(h: *mut c_void, sa: *mut c_void, stack: usize,
+                               start: unsafe extern "system" fn(*mut c_void) -> u32,
+                               param: *mut c_void, flags: u32, tid: *mut u32) -> *mut c_void;
+        fn ResumeThread(h: *mut c_void) -> u32;
+        fn GetExitCodeThread(h: *mut c_void, code: *mut u32) -> i32;
+        fn GetModuleHandleA(n: *const u8) -> *mut c_void;
+        fn GetProcAddress(h: *mut c_void, n: *const u8) -> *mut c_void;
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -150,9 +161,26 @@ mod imp {
         }
     }
 
+    /// 把补丁自检结果写到文件（证明补丁到底有没有落地）
+    unsafe fn log_verify(va: usize, want: &[u8], repl: &[u8], proc: *mut c_void) {
+        let mut buf = [0u8; 4];
+        let mut got = 0usize;
+        let ok = ReadProcessMemory(proc, va as *const c_void, buf.as_mut_ptr() as *mut c_void,
+                                   repl.len(), &mut got);
+        let mut s = String::new();
+        s.push_str(&format!("ADDR={:08X} want={:02X?} repl={:02X?} read_ok={} got={} now={:02X?}\n",
+                            va, want, repl, ok, got, &buf[..repl.len().min(4)]));
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(r"D://l1log//patch_verify.txt") {
+            let _ = f.write_all(s.as_bytes());
+        }
+    }
+
     /// 壳会反复重写代码页，补丁可能被覆盖 → 持续重打 20 秒
     pub unsafe fn patch_watchdog(proc: *mut c_void) {
-        for _ in 0..400 {
+        let mut tick: u32 = 0;
+        for _ in 0..20000 {
             for (va, want, repl) in PATCHES.iter() {
                 let mut buf = [0u8; 4];
                 let mut got = 0usize;
@@ -169,15 +197,152 @@ mod imp {
                         repl.len(), &mut written,
                     );
                     let _ = VirtualProtectEx(proc, *va as *mut c_void, repl.len(), old, &mut old);
+                    log_verify(*va, want, repl, proc);
                 }
             }
-            Sleep(50);
+            if tick % 100 == 0 {
+                log_probe(proc, tick);
+            }
+            tick += 1;
+            Sleep(1);
+        }
+    }
+
+    unsafe fn log_probe(proc: *mut c_void, tick: u32) {
+        use std::io::Write;
+        let mut line = String::new();
+        for (va, _want, repl) in PATCHES.iter() {
+            let mut buf = [0u8; 4];
+            let mut got = 0usize;
+            let ok = ReadProcessMemory(proc, *va as *const c_void, buf.as_mut_ptr() as *mut c_void,
+                                       repl.len(), &mut got);
+            line.push_str(&format!("t={}ms {:08X} ok={} now={:02X?} | ", tick, va, ok, &buf[..repl.len()]));
+        }
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(r"D://l1log//patch_probe.txt") {
+            let _ = f.write_all((line + "\n").as_bytes());
+        }
+    }
+
+    /// 从命令行参数读取真实服务器地址（由 bin 层设置）
+    pub fn set_real_server(ip: &str) {
+        if let Ok(mut g) = REAL_SERVER.lock() { *g = ip.to_string(); }
+    }
+    fn client_ip_hint() -> Option<String> {
+        REAL_SERVER.lock().ok().map(|g| g.clone()).filter(|s| !s.is_empty())
+    }
+    static REAL_SERVER: Mutex<String> = Mutex::new(String::new());
+
+    /// 挂起状态下把 login.dll 注入游戏（厂商登录器的核心动作）
+    unsafe fn inject_login_dll(proc: *mut c_void, client: &Path) -> bool {
+        let dll = client.join("login.dll");
+        let mut pb: Vec<u16> = dll.as_os_str().to_string_lossy().encode_utf16().collect();
+        pb.push(0);
+        let mem = VirtualAllocEx(proc, std::ptr::null_mut(), 4096, 0x3000, 0x04);
+        if mem.is_null() { return false; }
+        let mut w = 0usize;
+        let nbytes = pb.len() * 2;
+        let ok = WriteProcessMemory(proc, mem, pb.as_ptr() as *const c_void, nbytes, &mut w);
+        if ok == 0 { return false; }
+        let k32 = GetModuleHandleA(b"kernel32.dll\0".as_ptr());
+        let load = GetProcAddress(k32, b"LoadLibraryW\0".as_ptr());
+        if load.is_null() { return false; }
+        let f: unsafe extern "system" fn(*mut c_void) -> u32 = std::mem::transmute(load);
+        let th = CreateRemoteThread(proc, std::ptr::null_mut(), 0, f, mem, 0, std::ptr::null_mut());
+        if th.is_null() { return false; }
+        WaitForSingleObject(th, 5000);
+        // LoadLibraryA 的返回值 = 模块基址；0 = 失败（DllMain 返回了 FALSE）
+        let mut code: u32 = 0;
+        GetExitCodeThread(th, &mut code);
+        CloseHandle(th);
+        let _ = std::fs::OpenOptions::new().create(true).append(true)
+            .open(r"D://l1log//inject_log.txt")
+            .and_then(|mut f| { use std::io::Write; writeln!(f, "远程 LoadLibrary 返回基址: 0x{:X}", code) });
+        code != 0
+    }
+
+    /// 本地转发：127.0.0.1:2000 -> 真实服务器（对应厂商 login.dll 的作用）
+    pub fn start_local_proxy(target: &str) {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        let target = target.to_string();
+        std::thread::spawn(move || {
+            let listener = match TcpListener::bind("127.0.0.1:2000") {
+                Ok(l) => {
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(r"D://l1log//proxy_log.txt")
+                        .and_then(|mut f| { use std::io::Write; writeln!(f, "转发已启动 127.0.0.1:2000 -> {}", target) });
+                    l
+                }
+                Err(e) => {
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(r"D://l1log//proxy_log.txt")
+                        .and_then(|mut f| { use std::io::Write; writeln!(f, "转发绑定失败: {}", e) });
+                    return;
+                }
+            };
+            for c in listener.incoming() {
+                let mut c = match c { Ok(v) => v, Err(_) => continue };
+                let t = target.clone();
+                std::thread::spawn(move || {
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                    .open(r"D://l1log//proxy_log.txt")
+                    .and_then(|mut f| { use std::io::Write; writeln!(f, "收到游戏连接，转发到 {}", t) });
+                let mut s = match TcpStream::connect(&t) { Ok(v) => v, Err(e) => {
+                    let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        .open(r"D://l1log//proxy_log.txt")
+                        .and_then(|mut f| { use std::io::Write; writeln!(f, "连接目标失败: {}", e) });
+                    return;
+                } };
+                    let _ = c.set_nodelay(true);
+                    let _ = s.set_nodelay(true);
+                    let mut c2 = match c.try_clone() { Ok(v) => v, Err(_) => return };
+                    let mut s2 = match s.try_clone() { Ok(v) => v, Err(_) => return };
+                    std::thread::spawn(move || { let _ = std::io::copy(&mut c2, &mut s2); });
+                    let mut buf = [0u8; 8192];
+                    loop {
+                        match s.read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => { if c.write_all(&buf[..n]).is_err() { break; } }
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// 创建 "tcuhwmyi" 共享内存，写入 0x30（偏移 0x14）。句柄故意不关闭，随进程存活。
+    unsafe fn create_launcher_marker() {
+        // 名字用 UTF-16
+        let mut name: Vec<u16> = "tcuhwmyi".encode_utf16().collect();
+        name.push(0);
+        let h = CreateFileMappingW(
+            -1isize as *mut c_void,           // INVALID_HANDLE_VALUE
+            std::ptr::null_mut(),
+            0x04,                              // PAGE_READWRITE
+            0,
+            4096,
+            name.as_ptr(),
+        );
+        if h.is_null() {
+            return;
+        }
+        let p = MapViewOfFile(h, 0x000F001F, 0, 0, 4096); // FILE_MAP_ALL_ACCESS
+        if !p.is_null() {
+            let base = p as *mut u8;
+            std::ptr::write_bytes(base, 0, 64);
+            *base.add(0x14) = 0x30;
         }
     }
 
     /// 直接 CreateProcess：启动器自身已提权，子进程继承管理员令牌。
     /// 不能用 ShellExecute("runas")——`.bin` 没有文件关联，会报“没有应用程序与该文件有关联”。
     pub fn run(client: &Path, exe_name: &str, args: &str) -> Result<(), String> {
+        // 必须在启动游戏之前建好标记，游戏启动时会检查
+        unsafe { create_launcher_marker(); }
+        if let Some(ip) = client_ip_hint() {
+            start_local_proxy(&ip);
+        }
         let exe = client.join(exe_name);
         if !exe.is_file() {
             return Err(format!("找不到游戏程序: {}", exe.display()));
@@ -218,7 +383,7 @@ mod imp {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 0,
-                0,
+                0x00000004,   // CREATE_SUSPENDED：先挂起，注入 login.dll 后再恢复
                 std::ptr::null_mut(),
                 cwd.as_ptr(),
                 &si,
@@ -228,11 +393,25 @@ mod imp {
                 let e = std::io::Error::last_os_error();
                 return Err(format!("启动失败（{}）cmd={}", e, String::from_utf16_lossy(&cmd[..cmd.len()-1])));
             }
+            // ★ 在游戏跑任何代码之前，把 login.dll（登录 UI 库）注入进去
+            let inj = inject_login_dll(pi.h_process, client);
+            let _ = std::fs::OpenOptions::new().create(true).append(true)
+                .open(r"D://l1log//inject_log.txt")
+                .and_then(|mut f| { use std::io::Write; writeln!(f, "login.dll 注入: {}", inj) });
+            ResumeThread(pi.h_thread);
+
             // ★ 关键补丁：与厂商 login.exe 完全一致
             // 失败现场： 0F 85 97 00 00 00  (jne 0x4D5B8F  -> 跳去 RunTime Expired)
             // 成功现场： 90 E9 97 00 00 00  (nop + jmp   -> 永远跳过报错)
             // 逐字节对比两次 dump 得到，非猜测。
             apply_runtime_patch(pi.h_process);
+            {
+                // 关键：持续重打线程之前从未被调用（替换未命中），这里补上
+                let hp = pi.h_process as usize;
+                std::thread::spawn(move || unsafe {
+                    patch_watchdog(hp as *mut c_void);
+                });
+            }
 
             WaitForSingleObject(pi.h_process, 0xFFFF_FFFF);
             CloseHandle(pi.h_thread);
@@ -252,6 +431,22 @@ pub fn set_extra_patches(list: Vec<(usize, Vec<u8>, Vec<u8>)>) {
     {
         let _ = list;
     }
+}
+
+/// 带任意参数启动
+pub fn launch_game_with_args(client: &Path, exe_name: &str, args: &str) -> Result<(), String> {
+    #[cfg(windows)]
+    { imp::run(client, exe_name, args) }
+    #[cfg(not(windows))]
+    { let _ = (client, exe_name, args); Err("仅支持 Windows".into()) }
+}
+
+/// 设置真实服务器地址（用于本地转发）
+pub fn set_real_server(ip: &str) {
+    #[cfg(windows)]
+    { imp::set_real_server(ip); }
+    #[cfg(not(windows))]
+    { let _ = ip; }
 }
 
 pub fn launch_game(client: &Path, exe_name: &str) -> Result<(), String> {

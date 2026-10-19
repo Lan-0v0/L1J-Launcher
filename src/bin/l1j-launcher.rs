@@ -155,6 +155,21 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         l1j_launcher::launch::set_extra_patches(parse_patches(&cfg.extra_patches));
+        // 用第一个可用区的 IP 作为转发目标
+        if let Some(sv) = cfg.servers.iter().find(|x| x.enabled) {
+            l1j_launcher::launch::set_real_server(&sv.ip);
+        }
+        if cfg.dev_skip_select {
+            let pick = cfg.servers.iter().position(|x| x.enabled).unwrap_or(0);
+            let _ = pick;
+            return match cfg.launch_arg.as_deref() {
+                Some(a) if !a.trim().is_empty() => {
+                    l1j_launcher::launch::launch_game_with_args(client, &cfg.game_exe, a.trim())
+                }
+                _ => l1j_launcher::launch::launch_game_with_ip(
+                    client, &cfg.game_exe, &cfg.servers[pick].ip),
+            };
+        }
         if !cfg.servers.is_empty() {
             let list: Vec<l1j_launcher::select::Server> = cfg
                 .servers
