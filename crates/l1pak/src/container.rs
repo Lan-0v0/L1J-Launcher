@@ -24,6 +24,8 @@ pub struct Report {
     pub inplace: Vec<(String, i32, i32)>,
     /// (name, old_size, new_size, new_off)
     pub appended: Vec<(String, i32, i32, i32)>,
+    /// 本次新增的条目：(name, size, off)
+    pub added: Vec<(String, i32, i32)>,
     pub pak_old: usize,
     pub pak_new: usize,
     /// 原有数据区里被改动的字节数
@@ -242,6 +244,91 @@ impl Container {
         }
         self.entries = entries;
         self.index = index;
+
+        Ok(report)
+    }
+
+    /// 新增条目：数据追加到 pak 末尾，idx 尾部追加 28B 记录并把记录数 +1。
+    ///
+    /// 与 `replace` 的区别：
+    /// * 只允许**不存在**的条目名（已存在则报错，避免覆盖误用）；
+    /// * idx 正文变长 28 字节，不再是 8 的整数倍，因此必须**整段重新加密**
+    ///   （`cipher::encode` 对末尾余数原样保留，与原始 idx 的写法一致）；
+    /// * 写盘前用 `from_parts` 重新解析自检，逐条回读新增内容。
+    pub fn add(&mut self, additions: &BTreeMap<String, Vec<u8>>) -> Result<Report, String> {
+        if additions.is_empty() {
+            return Ok(Report {
+                pak_old: self.pak.len(),
+                pak_new: self.pak.len(),
+                ..Default::default()
+            });
+        }
+        for name in additions.keys() {
+            if self.index.contains_key(name) {
+                return Err(format!("条目已存在，不能新增：{}", name));
+            }
+            if name.is_empty() || name.len() > NAME_LEN {
+                return Err(format!("条目名长度必须 1..={} 字节：{}", NAME_LEN, name));
+            }
+            if name.as_bytes().iter().any(|&b| b == 0) {
+                return Err(format!("条目名不能含 0 字节：{}", name));
+            }
+        }
+
+        let mut pak = self.pak.clone();
+        let mut body = self.body.clone();
+        let mut report = Report {
+            pak_old: self.pak.len(),
+            ..Default::default()
+        };
+
+        for (name, data) in additions {
+            let enc = cipher::encode(data);
+            let new_off = pak.len() as i32;
+            let new_size = enc.len() as i32;
+            pak.extend_from_slice(&enc);
+
+            let mut rec = [0u8; REC_SIZE];
+            rec[0..4].copy_from_slice(&new_off.to_le_bytes());
+            rec[4..4 + name.len()].copy_from_slice(name.as_bytes());
+            rec[24..28].copy_from_slice(&new_size.to_le_bytes());
+            body.extend_from_slice(&rec);
+
+            report.added.push((name.clone(), new_size, new_off));
+        }
+
+        let n = self.entries.len() + additions.len();
+        let mut idx_out = Vec::with_capacity(4 + body.len());
+        idx_out.extend_from_slice(&(n as u32).to_le_bytes());
+        idx_out.extend_from_slice(&cipher::encode(&body));
+
+        // 自检：用新 idx + 新 pak 重新构造，确认条目数与内容都能读回来
+        let probe = Container::from_parts(idx_out.clone(), pak.clone())?;
+        if probe.entries.len() != n {
+            return Err(format!(
+                "自检失败：条目数 {}，应为 {}",
+                probe.entries.len(),
+                n
+            ));
+        }
+        for (name, data) in additions {
+            let back = probe
+                .plain_of(name)
+                .ok_or_else(|| format!("自检失败：新增条目不可读 {}", name))?;
+            if &back != data {
+                return Err(format!("自检失败：新增条目回读不一致 {}", name));
+            }
+        }
+
+        report.pak_new = pak.len();
+        report.bytes_appended = pak.len() - self.pak.len();
+        report.idx_changed = true;
+
+        self.pak = pak;
+        self.body = probe.body;
+        self.idx_raw = idx_out;
+        self.entries = probe.entries;
+        self.index = probe.index;
 
         Ok(report)
     }

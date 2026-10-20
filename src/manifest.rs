@@ -14,6 +14,18 @@ pub struct Entry {
     pub size: u64,
     /// 明文的 SHA-256（hex）
     pub sha256: String,
+    /// 合并方式：None/"replace" = 覆盖已有条目；"add" = 新增条目（idx 加一条记录）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
+}
+
+impl Entry {
+    pub fn is_add(&self) -> bool {
+        self.op
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("add"))
+            .unwrap_or(false)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -114,6 +114,7 @@ pub fn apply(
     };
 
     let mut patches: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut additions: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let total = plan.to_download.len();
     for (i, e) in plan.to_download.iter().enumerate() {
         progress(&format!("下载 {}", e.name), i, total, 0.0);
@@ -139,7 +140,16 @@ pub fn apply(
         if h != e.sha256 {
             return Err(format!("条目哈希不符 {}", e.name));
         }
-        if !c.index_of(&e.name).is_some() {
+        if e.is_add() {
+            if c.index_of(&e.name).is_some() {
+                // 幂等：重跑时条目已在，内容一致就跳过，不一致按替换处理
+                patches.insert(e.name.clone(), data);
+            } else {
+                additions.insert(e.name.clone(), data);
+            }
+            continue;
+        }
+        if c.index_of(&e.name).is_none() {
             return Err(format!("客户端容器里没有条目 {}", e.name));
         }
         patches.insert(e.name.clone(), data);
@@ -152,7 +162,14 @@ pub fn apply(
     let _ = std::fs::copy(client.join("Text.idx"), bdir.join("Text.idx.bak"));
 
     progress("合并到 Text.pak", total, total, 1.0);
-    let rep = c.replace(&patches)?;
+    let mut rep = c.replace(&patches)?;
+    if !additions.is_empty() {
+        let rep2 = c.add(&additions)?;
+        rep.added = rep2.added;
+        rep.pak_new = rep2.pak_new;
+        rep.bytes_appended += rep2.bytes_appended;
+        rep.idx_changed = true;
+    }
     c.save(client)
         .map_err(|e| format!("保存容器失败: {}", e))?;
     Ok(rep)
