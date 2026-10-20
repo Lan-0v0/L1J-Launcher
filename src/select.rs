@@ -7,6 +7,7 @@
 
 #![cfg(windows)]
 use std::ffi::c_void;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -189,6 +190,8 @@ const PING_CHECKING: u8 = 0;
 const PING_OK: u8 = 1;
 const PING_FAIL: u8 = 2;
 const PING_TIMEOUT_MS: u64 = 800;
+/// 连上之后等首包的时间（代理假连时这里会超时 -> 判为失败）
+const PING_READ_MS: u64 = 1500;
 const MAX_SRV: usize = 8;
 
 #[allow(clippy::declare_interior_mutable_const)]
@@ -208,6 +211,13 @@ fn ping_state(i: usize) -> (u8, u32) {
 /// 逐区一个线程并行探测；完成后 PostMessage 让主线程重绘
 /// （hwnd 以 usize 传递：*mut c_void 不能直接跨线程）
 fn spawn_pings(hwnd: usize, targets: Vec<(usize, String, Option<u16>)>) {
+    // 重置为「探测中」：窗口重新打开时不能沿用上一轮的结果（否则会显示过期绿灯）
+    for (idx, _, _) in targets.iter() {
+        if *idx < MAX_SRV {
+            PINGS[*idx].store(PING_CHECKING, Ordering::Relaxed);
+            PING_MS[*idx].store(0, Ordering::Relaxed);
+        }
+    }
     for (idx, ip, port) in targets {
         std::thread::spawn(move || unsafe {
             let hwnd = hwnd as *mut c_void;
@@ -233,7 +243,20 @@ fn spawn_pings(hwnd: usize, targets: Vec<(usize, String, Option<u16>)>) {
                 }
             };
             let t0 = Instant::now();
-            let ok = TcpStream::connect_timeout(&addr, Duration::from_millis(PING_TIMEOUT_MS)).is_ok();
+            // ★ 只靠 connect 成功不能判定「区服活着」：
+            //   Clash TUN / 各种透明代理会在本地就把 TCP 握手完成（连 192.0.2.1:9 都能"连上"），
+            //   所以必须读到真实字节才算通。Lineage 服务端 accept 后会立刻下发首包
+            //   （首字节=封包长度），因此读 1 字节即可可靠区分「真服」与「死服/代理假连」。
+            let mut ok = false;
+            if let Ok(mut stream) =
+                TcpStream::connect_timeout(&addr, Duration::from_millis(PING_TIMEOUT_MS))
+            {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(PING_READ_MS)));
+                let mut b = [0u8; 1];
+                if let Ok(1) = stream.read(&mut b) {
+                    ok = true;
+                }
+            }
             let ms = t0.elapsed().as_millis() as u32;
             if idx < MAX_SRV {
                 PINGS[idx].store(if ok { PING_OK } else { PING_FAIL }, Ordering::Relaxed);
