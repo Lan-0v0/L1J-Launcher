@@ -10,7 +10,7 @@ pub struct ServerCfg {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Encode 预生成的 ServerData（Base64）。仅供旧厂商登录器链路，自研链路不用
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_data: Option<String>,
     /// 游戏端口（默认 2000）。启动前写入 lineage.cfg（游戏从这里读连接地址，明文）
     #[serde(default)]
@@ -27,7 +27,7 @@ pub struct Config {
     /// 更新完成后要启动的程序（相对客户端目录）
     pub game_exe: String,
     /// 游戏服务器 IPv4；填了就按登录器的方式传十进制整数给游戏（路线乙）
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_ip: Option<String>,
     /// 客户端目录（相对 exe 所在目录；"." 表示同目录）
     #[serde(default = "default_client_dir")]
@@ -37,8 +37,8 @@ pub struct Config {
     /// 额外运行期补丁，格式 "地址:原字节HEX:新字节HEX"（如 "4173DD:75:90"）
     #[serde(default)]
     pub extra_patches: Vec<String>,
-    /// 传给游戏主程序的参数（厂商实测为 2130706433）
-    #[serde(default)]
+    /// 传给游戏主程序的参数（历史字段，仅 dev_skip_select 分支使用；示例配置不再生成）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_arg: Option<String>,
     /// 仅测试用：true 时自动选第一个可用区，不弹选区窗口（不影响 UI 配置）
     #[serde(default)]
@@ -82,21 +82,22 @@ pub fn write_example(path: &Path) -> std::io::Result<()> {
         public_key: "00".repeat(32),
         servers: vec![
             ServerCfg {
-                name: "龙潭天堂·一区".into(),
-                ip: "124.222.172.24".into(),
-                enabled: false, // 维护中
+                name: "示例区服·一区".into(),
+                // ip 可填 IPv4（1.2.3.4）或域名 / DDNS 主机名
+                ip: "127.0.0.1".into(),
+                enabled: false,
                 server_data: None,
-                port: None,
+                port: Some(2000),
             },
             ServerCfg {
-                name: "龙潭天堂·测试服".into(),
-                ip: "124.222.172.24".into(),
-                enabled: true,
+                name: "示例区服·二区".into(),
+                ip: "127.0.0.1".into(),
+                enabled: false,
                 server_data: None,
-                port: None,
+                port: Some(2001),
             },
         ],
-        launch_arg: Some("2130706433".into()),
+        launch_arg: None,
         dev_skip_select: false,
         launch_on_error: true,
         extra_patches: Vec::new(),

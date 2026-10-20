@@ -211,7 +211,18 @@ fn spawn_pings(hwnd: usize, targets: Vec<(usize, String, Option<u16>)>) {
     for (idx, ip, port) in targets {
         std::thread::spawn(move || unsafe {
             let hwnd = hwnd as *mut c_void;
-            let addr: SocketAddr = match format!("{}:{}", ip, port.unwrap_or(2000)).parse() {
+            // 允许配置里填域名：在后台线程解析，解析失败按超时处理（不阻塞 UI）
+            let host = match crate::launch::resolve_ipv4(&ip) {
+                Ok(h) => h,
+                Err(_) => {
+                    if idx < MAX_SRV {
+                        PINGS[idx].store(PING_FAIL, Ordering::Relaxed);
+                        PostMessageW(hwnd, WM_APP_PING, idx, 0);
+                    }
+                    return;
+                }
+            };
+            let addr: SocketAddr = match format!("{}:{}", host, port.unwrap_or(2000)).parse() {
                 Ok(a) => a,
                 Err(_) => {
                     if idx < MAX_SRV {

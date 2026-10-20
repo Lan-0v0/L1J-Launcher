@@ -643,7 +643,9 @@ pub fn launch_game(client: &Path, exe_name: &str) -> Result<(), String> {
 
 /// 直接拉起游戏主程序（带服务器 IP 十进制整数参数），供将来免登录器方案使用
 pub fn launch_game_with_ip(client: &Path, exe_name: &str, ip: &str) -> Result<(), String> {
-    let arg = ip_to_int(ip).ok_or_else(|| format!("IP 格式非法: {}", ip))?;
+    // 允许配置里填域名：先解析成 IPv4，再转十进制
+    let resolved = resolve_ipv4(ip)?;
+    let arg = ip_to_int(&resolved).ok_or_else(|| format!("IP 格式非法: {}", ip))?;
     #[cfg(windows)]
     {
         imp::run(client, exe_name, &arg.to_string())
@@ -664,9 +666,46 @@ pub fn ip_to_int(ip: &str) -> Option<u32> {
     Some(parts[0] * 16_777_216 + parts[1] * 65_536 + parts[2] * 256 + parts[3])
 }
 
+/// 把配置里的地址解析成 IPv4 字符串：本身就是点分 IP 就原样返回，否则走 DNS。
+///
+/// 这样 `launcher.json` 的 `servers[].ip` 既能填 `1.2.3.4`，也能填域名 / DDNS 主机名。
+/// （游戏真正的连接地址仍由 `ServerData` 决定，这里解析结果用于 ping 与启动参数）
+pub fn resolve_ipv4(host: &str) -> Result<String, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("地址为空".into());
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return Ok(host.to_string());
+    }
+    use std::net::ToSocketAddrs;
+    let addrs = (host, 0u16)
+        .to_socket_addrs()
+        .map_err(|e| format!("解析 {} 失败: {}", host, e))?;
+    for a in addrs {
+        if let std::net::SocketAddr::V4(v4) = a {
+            return Ok(v4.ip().to_string());
+        }
+    }
+    Err(format!("{} 没有可用的 IPv4 地址", host))
+}
+
 #[cfg(test)]
 mod tests {
     use super::ip_to_int;
+
+    #[test]
+    fn resolve_ipv4_accepts_ip_and_hostname() {
+        use super::resolve_ipv4;
+        // 点分 IP：原样返回（前后空格会被裁掉）
+        assert_eq!(resolve_ipv4("124.222.172.24").unwrap(), "124.222.172.24");
+        assert_eq!(resolve_ipv4(" 127.0.0.1 ").unwrap(), "127.0.0.1");
+        // 主机名：走 DNS 解析出 IPv4（localhost 在任何环境都应有映射）
+        assert_eq!(resolve_ipv4("localhost").unwrap(), "127.0.0.1");
+        // 空值直接报错，不做 DNS
+        assert!(resolve_ipv4("").is_err());
+        assert!(resolve_ipv4("   ").is_err());
+    }
 
     #[test]
     fn ip_int_matches_launcher() {

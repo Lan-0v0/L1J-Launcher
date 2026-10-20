@@ -75,8 +75,10 @@
 把选中区 IP 转成十进制整数作为**启动参数** → CreateProcess 拉起厂商登录器 →
 注入 quiet.dll 隐藏其选区弹窗 → 客户端连服
 
-> `apply_lineage_cfg()`（写 `lineage.cfg`）目前是**死代码**——全仓库没有调用点，
-> 实际连接地址走的是启动参数。将来若改成域名，需要先在本机解析成 IPv4 再传。
+> ⚠️ 真正决定连到哪台服务器的是 **`ServerData` 密文**（Encode 生成、含 IP+端口，游戏启动时自己解密）。
+> 启动参数里的十进制 IP 是冗余的：`Encode/README.md` 记录 2026-10-19 实测「命令行参数与此无关」。
+> `apply_lineage_cfg()`（写 `lineage.cfg`）是**死代码**，全仓库没有调用点。
+> ⇒ **换服务器 IP 时，必须用 Encode 重新生成 `servers.ini` 的 ServerData**，只改 `launcher.json` 不够。
 ```
 
 - 厂商登录器 **ini 有多条时永远只用第一条**，所以只写选中的那一块（按字节切 GBK，不转码）
@@ -120,6 +122,8 @@
 ```
 
 - `launch_on_error`：拉不到清单 / 验签失败时是否仍直接进游戏（默认 `true`）
+- `servers[].ip`：**可填 IPv4（`1.2.3.4`），也可填域名 / DDNS 主机名**；域名会在启动前解析成 IPv4
+  （用于选区 ping 和启动参数。真正的游戏连接地址仍由 `ServerData` 决定）
 - `servers` ≥ 2 时启动前弹选区窗口；`enabled: false` 的点显示为灰点且不可选
 
 ---
