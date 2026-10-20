@@ -1,24 +1,82 @@
 # L1J-Launcher
 
-天堂1 客户端**更新器**：检查更新 → 只下载差异条目 → 合并进 `Text.pak` → 启动游戏。
+天堂1 客户端**一体化启动器**：检查更新 → 选区 → 启动游戏。
 
-> ⚠️ 它**只做**这几件事。没有进程注入、没有内存补丁、不写注册表、不装驱动、不 hook API。
-> 这不是功能缺失，是刻意设计：二进制要一次装好、之后永不更新，才能避免杀软把每次更新当成新样本。
+界面是 Win32 原生窗口（GDI 自绘，底图取自客户端 `skin\`），**不用 Electron / WebView**，单文件、无运行时依赖。
+
+> ⚠️ 它只做这几件事：拉清单、验签、下载差异、写自己目录、起游戏。
+> 没有进程注入、没有内存补丁、不写注册表、不装驱动、不 hook API。
+> 这不是功能缺失，是刻意设计：二进制一次装好、之后不再自我更新，避免杀软把每次更新当成新样本。
 
 ---
 
-## 它解决的问题
+## 两条更新通道
 
-传统私服用 `eat.exe` 吃档：每次更新把补丁打成 zip，玩家端解压后调 `eat.exe` 把散装文件塞进容器。
-问题是：`eat.exe` 带毒（Sality 感染体）、要联网下载再执行、每次都是"陌生 exe 干高危操作"。
+| 通道 | 目标 | 能力 |
+|---|---|---|
+| **Text** | `Text.pak` 内部条目（NPC 对话页、字符串表） | 改已有条目、**新增条目**（新记录按名称小写序插入 idx，保持客户端二分查找可用） |
+| **文件** | 客户端目录内**任意文件**（反外挂组件、补丁 DLL、配置） | 新建 / 覆盖 / 删除；内容寻址下载、路径白名单、占用检测、原子替换、备份回滚 |
 
-本项目的做法：
+清单为 `schema 2`。**老清单没有 `files` 段时，行为与旧版完全一致**（已实测）。
 
-1. **发版端**（你的电脑）用 `L1J-eat-CN` 的 `l1eat text diff` 产出**条目级补丁**（几百字节）
-2. 用 `l1sign` 给 `manifest.json` 做 **Ed25519 签名**
-3. 玩家端登录器：拉清单 → **验签** → 比对本地容器 → **只下缺的那几个条目** → 校验 SHA-256 → 合并 → 启动
+### 清单结构
 
-全程客户端**不执行任何下载来的可执行文件**，只写自己目录里的 `Text.pak`。
+```json
+{
+  "schema": 2,
+  "container": "Text",
+  "version": "v20261020_xxx",
+  "created": "2026-10-20T09:53:01+0800",
+  "entries": [ { "name": "maker1-h.html", "size": 257, "sha256": "...", "op": "add" } ],
+  "files": {
+    "base": "files/",
+    "entries": [ { "path": "antibot/ac.dll", "size": 12345, "sha256": "..." } ],
+    "deletes": [ "antibot/old.dll" ]
+  },
+  "unsupported": { "added": [], "removed": [] }
+}
+```
+
+- `entries[].op`：缺省 = 覆盖已有条目，`add` = 新增（客户端容器里没有时走 add 分支）
+- `files[].path`：**相对客户端目录**的路径，正斜杠
+- 文件下载地址 = `<update_base><files.base><sha256>`（内容寻址，与路径无关，天然去重）
+
+---
+
+## 更新流程
+
+```
+拉 manifest.json + manifest.sig → Ed25519 验签 →
+比对本地（容器条目 / 文件 sha256）→ 只下差异 →
+逐条校验 size + sha256 → 合并容器 / 写文件 → 写 L1J_Update.json
+```
+
+**文件通道的写入顺序**（`update::apply_files`）：
+
+1. 校验 `size` + `sha256`，不符立即中止（不落盘）
+2. 占用检测：`CreateFileW(share=0)` 独占打开一次，被占用就提示关闭游戏
+3. 旧文件备份到 `backup_l1j/files/<版本>/<相对路径>`，并写 `_files.json` 记录「原本是否存在」
+4. 写 `<目标>.l1jtmp` → `MoveFileEx(REPLACE_EXISTING|WRITE_THROUGH)` 原子替换
+5. 删除项同样先备份再删
+
+**路径白名单**：拒绝绝对路径、盘符、`..`、ADS（`:`）、Windows 保留设备名（CON/NUL/COM1…）、
+通配符、片段结尾的点或空格。恶意清单在**计划阶段**就被拒绝，不会产生任何写入。
+
+**回滚**：`rollback_files()` 取最新版本备份目录按 `_files.json` 回放（原本存在的拷回，本次新建的删掉）；
+容器仍走 `backup_l1j/Text.pak.bak` / `Text.idx.bak`。
+
+---
+
+## 启动流程
+
+```
+更新（失败可跳过，直接进游戏）→ 选区窗口（真实 ping，绿/黄/红/灰）→
+按选区写 login_old.ini（只写被选中的那一条）+ lineage.cfg（IP/端口）→
+CreateProcess 拉起厂商登录器 → 注入 quiet.dll 隐藏其选区弹窗 → 客户端直连云服
+```
+
+- 厂商登录器 **ini 有多条时永远只用第一条**，所以只写选中的那一块（按字节切 GBK，不转码）
+- `quiet.dll` 用 `SetWinEventHook(EVENT_OBJECT_SHOW)` 拦住厂商选区窗，再用 `BM_CLICK` 点「进入游戏」
 
 ---
 
@@ -26,62 +84,76 @@
 
 ```
 龙潭天堂\
-  l1j-launcher.exe     ← 唯一的入口（玩家的桌面快捷方式指向它）
-  launcher.json        ← 配置（更新地址 + 公钥）
-  login_old.exe        ← 原厂商登录器（改名后保留区服选择界面）
+  Login.exe            ← 唯一入口
+  launcher.json        ← 配置（更新地址 / 公钥 / 区服列表）
+  Login.ico            ← 图标源（编译期已内嵌，运行时不需要它）
+  skin\                ← 厂商皮肤源（登录器底图从这里取，必须保留）
+  login_old.exe        ← 原厂商登录器（改名后保留）
   login_old.ini / login_old.cfg
   Text.pak / Text.idx  ← 要被更新的容器
+  backup_l1j\          ← 自动备份（容器 + 每次文件更新的旧版本）
   L1J_Update.json      ← 本地版本记录（由本程序写）
 ```
 
-> 原 `login.exe` 改名 `login_old.exe` 时，**`Login.ini` / `Login.cfg` 必须一起改名**
-> （实测：配置名跟着 exe 基名走，不改名会导致区服列表空白）。
+> 原 `login.exe` 改名 `login_old.exe` 时，`Login.ini` / `Login.cfg` **必须一起改名**
+> （配置名跟着 exe 基名走，不改名会导致区服列表空白）。
 
 ## `launcher.json`
 
 ```json
 {
-  "update_base": "https://your-domain/l1update/",
+  "update_base": "http://<host>:1999/",
   "game_exe": "login_old.exe",
   "client_dir": ".",
   "public_key": "c74b4736...（64 个 hex 字符）",
-  "launch_on_error": true
+  "launch_on_error": true,
+  "servers": [
+    { "name": "龙潭天堂·测试", "ip": "<host>", "enabled": true, "port": 2000 },
+    { "name": "龙潭天堂·合区", "ip": "<host>", "enabled": true, "port": 2001 },
+    { "name": "龙潭天堂·三区", "ip": "<host>", "enabled": false, "port": 2002 }
+  ]
 }
 ```
 
-- `launch_on_error`：拉不到清单 / 验签失败时，是否仍然直接进游戏（默认 `true`，避免服务器挂了玩家进不去）
+- `launch_on_error`：拉不到清单 / 验签失败时是否仍直接进游戏（默认 `true`）
+- `servers` ≥ 2 时启动前弹选区窗口；`enabled: false` 的点显示为灰点且不可选
 
 ---
 
-## 服务端目录（静态文件，不需要任何程序）
+## 服务端静态目录（不需要任何程序）
 
 ```
 l1update/
-  manifest.json     ← 由 l1eat text diff 产出
-  manifest.sig      ← 由 l1sign 产出（对 manifest.json 的**原始字节**签名）
-  text/
-    boss1-h.html    ← 只放本次变更的条目
+  manifest.json      ← l1eat text diff / file pack 产出
+  manifest.sig       ← l1sign 产出（对 manifest.json 原始字节签名）
+  text/              ← 只放本次变更的容器条目
+  files/<sha256>     ← 文件通道内容（按哈希命名）
 ```
+
+部署方式：`python3 -m http.server 1999 --directory /opt/l1j/update` + systemd（`l1update.service`）。
 
 ---
 
-## 发版三步
+## 发版
 
 ```bat
-:: 1) 比对两版客户端，产出 release
-l1eat text diff --base 线上版客户端 --target 改过的客户端 --out release\v2026101901 --version 2026101901
+:: ① 容器条目：比对两版客户端
+l1eat text diff --base 线上客户端 --target 改过的客户端 --out release\vXXX --version vXXX
 
-:: 2) 签名（私钥只留本机）
-l1sign sign release\v2026101901\manifest.json priv.hex
+:: ② 普通文件：把目录打进同一个 release（可反复执行，按路径去重）
+l1eat file pack --src 要发布的目录 --release release\vXXX [--prefix antibot] [--delete old/x.dll]
 
-:: 3) 上传 manifest.json / manifest.sig / text\ 到 l1update/
+:: ③ 签名（私钥只留本机）
+l1sign sign release\vXXX\manifest.json priv.hex
+
+:: ④ 上传 manifest.json / manifest.sig / text\ / files\
 ```
 
 ## 命令行
 
 ```bat
-l1j-launcher.exe              检查更新 → 合并 → 启动游戏
-l1j-launcher.exe --no-launch  只更新不启动（自测用）
+Login.exe            直接进图形界面（更新 → 选区 → 游戏）
+Login.exe --console  控制台模式：只跑更新并打印明细（自测/排错）
 l1sign keygen priv.hex pub.hex
 l1sign sign   manifest.json priv.hex
 l1sign verify manifest.json pub.hex
@@ -91,39 +163,44 @@ l1sign verify manifest.json pub.hex
 
 ## 构建
 
-需要 Rust（本项目在 `x86_64-pc-windows-gnu` 下开发，机器无需 MSVC）：
+Rust + MinGW（Windows 目标 `i686-pc-windows-gnu`，机器无需 MSVC）：
 
 ```bash
-export CARGO_HOME=E:/Rust/cargo RUSTUP_HOME=E:/Rust/rustup
-export PATH=$PATH:/e/Rust/cargo/bin
-cargo build --release
+export PATH="/d/l1log/tc/mingw32/bin:/c/Users/<user>/.cargo/bin:$PATH"
+cd /d/l1log/build/l1j-launcher     # ★必须在纯 ASCII 路径下构建
+cargo build --release --target i686-pc-windows-gnu
 ```
 
-**两个本机坑**（换机器时注意）：
+**三个坑**（换机器必看）：
 
-1. 源码在含中文的路径下时，MinGW 的 `ld` 会报 `cannot find *.rcgu.o` → 必须把构建产物放到纯英文目录
-   （已在 `E:\Rust\cargo\config.toml` 设 `[build] target-dir = "E:/Rust/target"`）
-2. 早期版本依赖 `windows` crate，其构建脚本需要 `dlltool.exe`；现已**手写 WinHTTP FFI** 去掉该依赖，
-   只需要 MinGW 自带的 `libwinhttp.a`。
+1. **源码放在含中文的路径下，MinGW 的 `ld` 会失败**（找不到 `*.rcgu.o`）→ 构建目录必须是纯 ASCII
+2. `windres` 只有 `windres.exe`，**不要**设 `WINDRES=i686-w64-mingw32-windres.exe`（会启动失败）
+3. `cargo` 在 `C:\Users\<user>\.cargo\bin`，**不要**把 `CARGO_HOME` 指到别处（会 command not found）
 
-产物：`l1j-launcher.exe` 约 **553 KB**，`l1sign.exe` 约 388 KB，均为单文件、无运行时依赖。
+图标由 `icon.rc` + `build.rs` 在编译期嵌入（`assets/app.ico` 换成新图后重编译即可）。
+
+产物：`l1j-launcher.exe` ≈ **2.7 MB**（含 5 档图标）、`l1sign.exe` ≈ **488 KB**，均为单文件、无运行时依赖。
 
 ---
 
 ## 依赖
 
-- `crates/l1pak` —— 从 `L1J-eat-CN/rust/l1pak` 内置的容器读写库（与 Python 版逐字节等价，靠 golden vectors 对拍）
-  - 上游更新后用脚本同步，不要在这里直接改
+- `crates/l1pak` —— 内置的容器读写库（与 `L1J-eat-CN/rust/l1pak` 同一份代码，上游改动后同步过来，不要在这里直接改）
 - `ed25519-dalek` —— 验签
 - `serde` / `serde_json` / `sha2`
 
 ## 当前状态
 
-- [x] 清单 + Ed25519 验签
-- [x] 只下差异条目 + SHA-256 校验
-- [x] 原地写 / 尾部追加（不紧凑重建）
+- [x] 清单 + Ed25519 验签（对原始字节签名）
+- [x] 只下差异 + SHA-256 校验
+- [x] 容器：原地写 / 尾部追加 / **新增条目**（按名称小写序插入 idx）
+- [x] 文件通道：任意文件新建 / 覆盖 / 删除（白名单 + 占用检测 + 原子替换 + 备份）
 - [x] 幂等（已是最新则跳过）
 - [x] 失败可跳过更新直接进游戏
-- [ ] GUI（进度条窗口）
-- [ ] 首次全量校验
-- [ ] 回滚（保留上一版容器）
+- [x] GUI（加载窗 + 选区窗、双进度条缓动动画、等待态流动块）
+- [x] 真实 ping（圆点：绿 <150ms / 黄 / 红 / 灰=禁用）
+- [x] 首次全量校验（`verify_container`）
+- [x] 回滚实现（容器 + 文件）
+- [x] 联网超时（WinHTTP 解析 3s / 连接 3s / 发送 5s / 接收 5s）
+- [ ] 「Recover」按钮接线到 `rollback()`（函数已就绪，按钮仍是占位）
+- [ ] 清单全量语义（`export_changes` 只写本次变更，玩家跳版本可能漏更）
