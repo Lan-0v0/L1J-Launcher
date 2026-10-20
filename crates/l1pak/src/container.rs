@@ -282,7 +282,13 @@ impl Container {
             ..Default::default()
         };
 
-        for (name, data) in additions {
+        // ★idx 必须保持“按名称小写序”——客户端用二分查找，追加到末尾会直接查不到。
+        // 所以新记录插到“第一个小写序比它大的记录”之前（现有记录的相对顺序不动）。
+        let mut order: Vec<String> = self.entries.iter().map(|e| e.name.clone()).collect();
+        let mut sorted: Vec<(&String, &Vec<u8>)> = additions.iter().collect();
+        sorted.sort_by(|a, b| a.0.to_ascii_lowercase().cmp(&b.0.to_ascii_lowercase()));
+
+        for (name, data) in sorted {
             let enc = cipher::encode(data);
             let new_off = pak.len() as i32;
             let new_size = enc.len() as i32;
@@ -292,7 +298,15 @@ impl Container {
             rec[0..4].copy_from_slice(&new_off.to_le_bytes());
             rec[4..4 + name.len()].copy_from_slice(name.as_bytes());
             rec[24..28].copy_from_slice(&new_size.to_le_bytes());
-            body.extend_from_slice(&rec);
+
+            let key = name.to_ascii_lowercase();
+            let pos = order
+                .iter()
+                .position(|n| n.to_ascii_lowercase() > key)
+                .unwrap_or(order.len());
+            let at = pos * REC_SIZE;
+            body.splice(at..at, rec.iter().copied());
+            order.insert(pos, name.clone());
 
             report.added.push((name.clone(), new_size, new_off));
         }
