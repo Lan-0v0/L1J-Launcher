@@ -94,40 +94,59 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
             return;
         }
     };
-    if manifest.entries.is_empty() {
+    let files_cfg = manifest.files.clone().unwrap_or_default();
+    let has_text = !manifest.entries.is_empty();
+    let has_files = !files_cfg.is_empty();
+    if !has_text && !has_files {
         set(Phase::Done, 1.0, 1.0, "已是最新版本".into());
         return;
     }
 
-    let mut container = match Container::load(&client) {
-        Ok(c) => c,
+    // 只有存在 Text 条目时才需要容器；纯文件更新不依赖 Text.pak
+    let mut container = if has_text {
+        match Container::load(&client) {
+            Ok(c) => {
+                if let Err(e) = update::verify_container(&c) {
+                    set(Phase::Failed, 0.0, 0.0, format!("客戶端校驗失敗：{}", trim(&e, 24)));
+                    return;
+                }
+                Some(c)
+            }
+            Err(e) => {
+                set(Phase::Failed, 0.0, 0.0, format!("讀取客戶端失敗：{}", trim(&e, 26)));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
+    let plan = match update::plan(&manifest, container.as_ref(), &client) {
+        Ok(p) => p,
         Err(e) => {
-            set(Phase::Failed, 0.0, 0.0, format!("讀取客戶端失敗：{}", trim(&e, 26)));
+            set(Phase::Failed, 0.0, 0.0, format!("更新失敗：{}", trim(&e, 32)));
             return;
         }
     };
-    if let Err(e) = update::verify_container(&container) {
-        set(Phase::Failed, 0.0, 0.0, format!("客戶端校驗失敗：{}", trim(&e, 24)));
-        return;
-    }
-    let plan = update::plan(&manifest, &container);
-    if plan.to_download.is_empty() {
-        let _ = update::write_local_version(&client, &plan.version, &[]);
+    if plan.to_download.is_empty() && plan.files.is_empty() {
+        let _ = update::write_local_version(&client, &plan.version, &[], &[]);
         set(Phase::Done, 1.0, 1.0, format!("已是最新（{}）", plan.version));
         return;
     }
 
-    let res = update::apply(
-        &cfg.update_base,
-        &client,
-        &mut container,
-        &plan,
-        &mut |desc, i, n, frac| {
-            // 蓝条 = 当前这一条的下载进度（字节级）；红条 = 总进度（含当前条的分数部分）
-            let ovr = if n == 0 {
+    let n_text = plan.to_download.len();
+    let n_files = plan.files.to_download.len() + plan.files.to_delete.len();
+    let total = n_text + n_files;
+    let mut applied_text: Vec<String> = Vec::new();
+    let mut applied_files: Vec<String> = Vec::new();
+
+    // ---- Text 通道 ----
+    if n_text > 0 {
+        let mut prog = |desc: &str, i: usize, _n: usize, frac: f32| {
+            let ovr = if total == 0 {
                 0.0
             } else {
-                ((i as f32) + frac) / (n as f32)
+                ((i as f32) + frac) / (total as f32)
             };
             set(
                 Phase::Working,
@@ -139,17 +158,66 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
                     format!("正在下載更新… {}", desc)
                 }),
             );
-        },
-    );
-
-    match res {
-        Ok(_) => {
-            let names: Vec<String> = plan.to_download.iter().map(|e| e.name.clone()).collect();
-            let _ = update::write_local_version(&client, &plan.version, &names);
-            set(Phase::Done, 1.0, 1.0, format!("更新完成（{}）", plan.version));
+        };
+        match update::apply(
+            &cfg.update_base,
+            &client,
+            container.as_mut().unwrap(),
+            &plan,
+            &mut prog,
+        ) {
+            Ok(_) => {
+                applied_text = plan.to_download.iter().map(|e| e.name.clone()).collect()
+            }
+            Err(e) => {
+                set(Phase::Failed, 0.0, 0.0, format!("更新失敗：{}", trim(&e, 32)));
+                return;
+            }
         }
-        Err(e) => set(Phase::Failed, 0.0, 0.0, format!("更新失敗：{}", trim(&e, 32))),
     }
+
+    // ---- 文件通道 ----
+    if n_files > 0 {
+        let mut prog = |desc: &str, i: usize, _n: usize, frac: f32| {
+            let done = (n_text + i) as f32 + frac;
+            let ovr = if total == 0 { 0.0 } else { done / (total as f32) };
+            set(
+                Phase::Working,
+                frac,
+                ovr,
+                (if desc.is_empty() {
+                    "正在下載更新…".to_string()
+                } else {
+                    format!("正在下載更新… {}", desc)
+                }),
+            );
+        };
+        match update::apply_files(
+            &cfg.update_base,
+            &client,
+            &files_cfg,
+            &plan.files,
+            &plan.version,
+            &mut prog,
+        ) {
+            Ok(_) => {
+                applied_files = plan
+                    .files
+                    .to_download
+                    .iter()
+                    .map(|e| e.path.clone())
+                    .chain(plan.files.to_delete.iter().cloned())
+                    .collect();
+            }
+            Err(e) => {
+                set(Phase::Failed, 0.0, 0.0, format!("更新失敗：{}", trim(&e, 32)));
+                return;
+            }
+        }
+    }
+
+    let _ = update::write_local_version(&client, &plan.version, &applied_text, &applied_files);
+    set(Phase::Done, 1.0, 1.0, format!("更新完成（{}）", plan.version));
 }
 
 /// 解析 "地址:原字节HEX:新字节HEX"
@@ -323,44 +391,114 @@ fn console_flow(cfg: &Config, client: &Path) {
         update::read_local_version(client).map(|v| v.version),
         manifest.version
     );
-    let mut c = match Container::load(client) {
-        Ok(c) => c,
+    let files_cfg = manifest.files.clone().unwrap_or_default();
+    let has_text = !manifest.entries.is_empty();
+    let has_files = !files_cfg.is_empty();
+    if !has_text && !has_files {
+        println!("清单为空，已是最新。");
+        return;
+    }
+
+    let mut c = if has_text {
+        match Container::load(client) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("{}", e);
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let plan = match update::plan(&manifest, c.as_ref(), client) {
+        Ok(p) => p,
         Err(e) => {
-            eprintln!("{}", e);
+            eprintln!("生成更新计划失败: {}", e);
             return;
         }
     };
-    let plan = update::plan(&manifest, &c);
     println!(
-        "条目 {} 条：需下载 {}，已是最新 {}",
+        "Text 条目 {}：需下载 {}，已是最新 {} | 文件 {}：需下载 {}，删除 {}，已是最新 {}",
         manifest.entries.len(),
         plan.to_download.len(),
-        plan.skipped
+        plan.skipped,
+        files_cfg.entries.len(),
+        plan.files.to_download.len(),
+        plan.files.to_delete.len(),
+        plan.files.skipped
     );
-    if plan.to_download.is_empty() {
-        let _ = update::write_local_version(client, &plan.version, &[]);
-        println!("已是最新。");
-        return;
+
+    let mut applied_text: Vec<String> = Vec::new();
+    let mut applied_files: Vec<String> = Vec::new();
+
+    if !plan.to_download.is_empty() {
+        match update::apply(&cfg.update_base, client, c.as_mut().unwrap(), &plan, &mut |d, i, n, frac| {
+            if frac <= 0.0 || frac >= 1.0 {
+                println!("  [{}/{}] {}", i + 1, n, d)
+            } else {
+                print!("\r  [{}/{}] {} {:.0}%   ", i + 1, n, d, frac * 100.0);
+                let _ = std::io::stdout().flush();
+            }
+        }) {
+            Ok(rep) => {
+                println!(
+                    "合并完成：原地写 {} 条，追加 {} 条；pak {} → {} B",
+                    rep.inplace.len(),
+                    rep.appended.len(),
+                    rep.pak_old,
+                    rep.pak_new
+                );
+                applied_text = plan.to_download.iter().map(|e| e.name.clone()).collect();
+            }
+            Err(e) => {
+                eprintln!("更新失败: {}", e);
+                return;
+            }
+        }
     }
-    match update::apply(&cfg.update_base, client, &mut c, &plan, &mut |d, i, n, frac| {
-        if frac <= 0.0 || frac >= 1.0 {
-            println!("  [{}/{}] {}", i + 1, n, d)
-        } else {
-            print!("\r  [{}/{}] {} {:.0}%   ", i + 1, n, d, frac * 100.0);
-            let _ = std::io::stdout().flush();
+
+    if plan.files.is_empty() {
+        println!("文件通道：无变更");
+    } else {
+        match update::apply_files(
+            &cfg.update_base,
+            client,
+            &files_cfg,
+            &plan.files,
+            &plan.version,
+            &mut |d, i, n, frac| {
+                if frac <= 0.0 || frac >= 1.0 {
+                    println!("  [文件 {}/{}] {}", i + 1, n, d)
+                } else {
+                    print!("\r  [文件 {}/{}] {} {:.0}%   ", i + 1, n, d, frac * 100.0);
+                    let _ = std::io::stdout().flush();
+                }
+            },
+        ) {
+            Ok(rep) => {
+                println!(
+                    "文件通道完成：写入 {} 个，删除 {} 个，备份 {}",
+                    rep.written,
+                    rep.deleted,
+                    rep.backup.unwrap_or_else(|| "-".into())
+                );
+                applied_files = plan
+                    .files
+                    .to_download
+                    .iter()
+                    .map(|e| e.path.clone())
+                    .chain(plan.files.to_delete.iter().cloned())
+                    .collect();
+            }
+            Err(e) => {
+                eprintln!("文件通道失败: {}", e);
+                return;
+            }
         }
-    }) {
-        Ok(rep) => {
-            println!(
-                "合并完成：原地写 {} 条，追加 {} 条；pak {} → {} B",
-                rep.inplace.len(),
-                rep.appended.len(),
-                rep.pak_old,
-                rep.pak_new
-            );
-            let names: Vec<String> = plan.to_download.iter().map(|e| e.name.clone()).collect();
-            let _ = update::write_local_version(client, &plan.version, &names);
-        }
-        Err(e) => eprintln!("更新失败: {}", e),
+    }
+
+    let _ = update::write_local_version(client, &plan.version, &applied_text, &applied_files);
+    if applied_text.is_empty() && applied_files.is_empty() {
+        println!("已是最新。");
     }
 }

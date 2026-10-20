@@ -28,6 +28,43 @@ impl Entry {
     }
 }
 
+/// 普通文件（客户端目录内的任意文件，例如反外挂组件）
+///
+/// 与容器条目不同：`path` 是**相对客户端目录**的路径，正斜杠分隔。
+/// 新增/覆盖不区分——本地没有就创建，有就替换（替换前自动备份）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// 文件通道：内容寻址下载（`files/<sha256>`）+ 显式删除列表
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Files {
+    /// 下载子目录，缺省 "files/"。内容以 sha256 命名，与路径无关
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub entries: Vec<FileEntry>,
+    /// 要从客户端删除的相对路径
+    #[serde(default)]
+    pub deletes: Vec<String>,
+}
+
+impl Files {
+    pub fn base_dir(&self) -> &str {
+        match self.base.as_deref() {
+            Some(b) if !b.is_empty() => b,
+            _ => "files/",
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.deletes.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Unsupported {
     #[serde(default)]
@@ -46,6 +83,9 @@ pub struct Manifest {
     pub created: Option<String>,
     #[serde(default)]
     pub entries: Vec<Entry>,
+    /// 文件通道（可缺省；老清单没有这一段，行为与以前完全一致）
+    #[serde(default)]
+    pub files: Option<Files>,
     #[serde(default)]
     pub unsupported: Option<Unsupported>,
 }
