@@ -1,1 +1,6 @@
 target/
+
+# 签名私钥：绝不入库（git 历史不可变，删除也抹不掉）
+keys/*.key
+keys/*.seed
+keys/*.pem
