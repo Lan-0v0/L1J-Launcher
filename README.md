@@ -171,12 +171,40 @@ l1sign verify manifest.json pub.hex
 
 ## 构建
 
-Rust + MinGW（Windows 目标 `i686-pc-windows-gnu`，机器无需 MSVC）：
+Rust + MinGW（机器无需 MSVC）。**必须用 `i686-win7-windows-gnu`**，不能用默认的 `i686-pc-windows-gnu`：
 
 ```bash
 export PATH="/d/l1log/tc/mingw32/bin:/c/Users/<user>/.cargo/bin:$PATH"
-cd /d/l1log/build/l1j-launcher     # ★必须在纯 ASCII 路径下构建
-cargo build --release --target i686-pc-windows-gnu
+cd /d/l1win7build/l1j-launcher       # ★必须在纯 ASCII 路径下构建
+tools/win7/build-win7.sh             # 内含 build-std 与导入表校验
+```
+
+### ★ 为什么不能用默认 target（2026-10-22 线上事故）
+
+Rust 1.78 起，`i686-pc-windows-gnu` 的最低系统要求被抬到 **Windows 10**，会静态导入 5 个
+Win7 根本不存在的 API：
+
+| DLL | 函数 | 起始版本 |
+|---|---|---|
+| `api-ms-win-core-synch-l1-2-0` | `WaitOnAddress` / `WakeByAddressAll` / `WakeByAddressSingle` | Win8 |
+| `bcryptprimitives` | `ProcessPrng` | Win10 1709 |
+| `KERNEL32` | `GetSystemTimePreciseAsFileTime` | Win8 |
+
+Win7 加载器解析这些 API Set forwarder 时**直接抛访问违例**，表现为
+「应用程序无法正常启动 (0xc0000005)」，**且不会提示缺少 DLL**，极难排查。
+`quiet.dll` 同理（旧版还多一个 `WS2_32!GetHostNameW`）。
+
+正确 target 是 `i686-win7-windows-gnu`（Tier 3，`target_vendor="win7"`，无预编译 std）：
+
+- 宿主必须用 **`nightly-x86_64-pc-windows-gnu`**（普通 `nightly` 是 msvc 宿主，交叉链 gnu 目标会失败）
+- 需要 `rust-src` 组件 + `-Z build-std=std`（cdylib 再加 `,panic_abort`）
+- 构建目录必须是纯 ASCII 路径（`-Z build-std` 要现编 std，中文路径会失败）
+
+**打包前必须过导入表守卫**（`build-win7.sh` 已自动调用）：
+
+```bash
+python tools/win7/check_pe_imports.py dist-win7/l1j-launcher.exe quiet.dll
+# 退出码 0 = 干净；1 = 有 Win8+ 导入，禁止发布
 ```
 
 **三个坑**（换机器必看）：
