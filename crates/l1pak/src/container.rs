@@ -26,6 +26,8 @@ pub struct Report {
     pub appended: Vec<(String, i32, i32, i32)>,
     /// 本次新增的条目：(name, size, off)
     pub added: Vec<(String, i32, i32)>,
+    /// 本次删除的条目：(name, size, off)
+    pub removed: Vec<(String, i32, i32)>,
     pub pak_old: usize,
     pub pak_new: usize,
     /// 原有数据区里被改动的字节数
@@ -339,6 +341,85 @@ impl Container {
         report.idx_changed = true;
 
         self.pak = pak;
+        self.body = probe.body;
+        self.idx_raw = idx_out;
+        self.entries = probe.entries;
+        self.index = probe.index;
+
+        Ok(report)
+    }
+
+    /// 删除条目：只从 idx 摘掉记录并把条目数 -1，**数据区一个字节都不动**。
+    ///
+    /// 与 `add` 完全对称：idx 正文变短 28 字节，同样不是 8 的整数倍，所以必须
+    /// **整段重新加密**（`cipher::encode` 会把末尾 4 字节余数原样保留）。
+    ///
+    /// 被删条目的旧数据留在 `Text.pak` 里成为空洞，不回收也不搬移 —— 这样其余
+    /// 条目的 `off` 全部保持不变，是风险最小的做法（与 `replace` 换长度时尾部
+    /// 追加、旧数据不搬移的策略一致）。
+    pub fn remove(&mut self, names: &[String]) -> Result<Report, String> {
+        if names.is_empty() {
+            return Ok(Report {
+                pak_old: self.pak.len(),
+                pak_new: self.pak.len(),
+                ..Default::default()
+            });
+        }
+
+        let mut positions: Vec<usize> = Vec::new();
+        for name in names {
+            match self.index.get(name) {
+                Some(&i) => {
+                    if !positions.contains(&i) {
+                        positions.push(i);
+                    }
+                }
+                None => return Err(format!("条目不在容器中，不能删除：{}", name)),
+            }
+        }
+        // 从后往前摘，避免前面的删除让后面的下标整体前移
+        positions.sort_unstable();
+
+        let mut body = self.body.clone();
+        let mut removed: Vec<(String, i32, i32)> = Vec::new();
+        for &i in positions.iter().rev() {
+            let at = i * REC_SIZE;
+            let e = &self.entries[i];
+            removed.push((e.name.clone(), e.size, e.off));
+            body.drain(at..at + REC_SIZE);
+        }
+        removed.reverse(); // 恢复成名称序，日志更好读
+
+        let n = self.entries.len() - positions.len();
+        let mut idx_out = Vec::with_capacity(4 + body.len());
+        idx_out.extend_from_slice(&(n as u32).to_le_bytes());
+        idx_out.extend_from_slice(&cipher::encode(&body));
+
+        // 自检：新 idx 必须能解析、条目数对得上、被删的确实读不到。
+        // 其余条目不需要逐条回读 —— 它们的 off/size 是从旧 idx 原样搬过来的，
+        // 数据区没动，结构对了就一定能读（全量解密要几秒，不值得）。
+        let probe = Container::from_parts(idx_out.clone(), self.pak.clone())?;
+        if probe.entries.len() != n {
+            return Err(format!(
+                "自检失败：删除后条目数 {}，应为 {}",
+                probe.entries.len(),
+                n
+            ));
+        }
+        for (name, _, _) in &removed {
+            if probe.plain_of(name).is_some() {
+                return Err(format!("自检失败：{} 删除后仍可读到", name));
+            }
+        }
+
+        let report = Report {
+            removed,
+            pak_old: self.pak.len(),
+            pak_new: self.pak.len(),
+            idx_changed: true,
+            ..Default::default()
+        };
+
         self.body = probe.body;
         self.idx_raw = idx_out;
         self.entries = probe.entries;

@@ -144,13 +144,14 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared, self_updated: bool) {
     let files_cfg = manifest.files.clone().unwrap_or_default();
     let has_text = !manifest.entries.is_empty();
     let has_files = !files_cfg.is_empty();
-    if !has_text && !has_files {
+    let has_del = !manifest.text_deletes.is_empty();
+    if !has_text && !has_files && !has_del {
         set(Phase::Done, 1.0, 1.0, "已是最新版本".into());
         return;
     }
 
-    // 只有存在 Text 条目时才需要容器；纯文件更新不依赖 Text.pak
-    let mut container = if has_text {
+    // Text 条目与「删除条目」都要碰容器；纯文件更新才不依赖 Text.pak
+    let mut container = if has_text || has_del {
         match Container::load(&client) {
             Ok(c) => {
                 if let Err(e) = update::verify_container(&c) {
@@ -175,7 +176,7 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared, self_updated: bool) {
             return;
         }
     };
-    if plan.to_download.is_empty() && plan.files.is_empty() {
+    if plan.to_download.is_empty() && plan.files.is_empty() && plan.to_remove.is_empty() {
         let _ = update::write_local_version(&client, &plan.version, &[], &[]);
         set(Phase::Done, 1.0, 1.0, format!("已是最新（{}）", plan.version));
         return;
@@ -187,8 +188,8 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared, self_updated: bool) {
     let mut applied_text: Vec<String> = Vec::new();
     let mut applied_files: Vec<String> = Vec::new();
 
-    // ---- Text 通道 ----
-    if n_text > 0 {
+    // ---- Text 通道（含条目删除）----
+    if n_text > 0 || !plan.to_remove.is_empty() {
         let mut prog = |desc: &str, i: usize, _n: usize, frac: f32| {
             let ovr = if total == 0 {
                 0.0
@@ -459,12 +460,13 @@ fn console_flow(cfg: &Config, client: &Path, self_updated: bool) {
     let files_cfg = manifest.files.clone().unwrap_or_default();
     let has_text = !manifest.entries.is_empty();
     let has_files = !files_cfg.is_empty();
-    if !has_text && !has_files {
+    let has_del = !manifest.text_deletes.is_empty();
+    if !has_text && !has_files && !has_del {
         println!("清单为空，已是最新。");
         return;
     }
 
-    let mut c = if has_text {
+    let mut c = if has_text || has_del {
         match Container::load(client) {
             Ok(c) => Some(c),
             Err(e) => {
@@ -483,10 +485,11 @@ fn console_flow(cfg: &Config, client: &Path, self_updated: bool) {
         }
     };
     println!(
-        "Text 条目 {}：需下载 {}，已是最新 {} | 文件 {}：需下载 {}，删除 {}，已是最新 {}",
+        "Text 条目 {}：需下载 {}，已是最新 {}，待删 {} | 文件 {}：需下载 {}，删除 {}，已是最新 {}",
         manifest.entries.len(),
         plan.to_download.len(),
         plan.skipped,
+        plan.to_remove.len(),
         files_cfg.entries.len(),
         plan.files.to_download.len(),
         plan.files.to_delete.len(),
@@ -496,7 +499,7 @@ fn console_flow(cfg: &Config, client: &Path, self_updated: bool) {
     let mut applied_text: Vec<String> = Vec::new();
     let mut applied_files: Vec<String> = Vec::new();
 
-    if !plan.to_download.is_empty() {
+    if !plan.to_download.is_empty() || !plan.to_remove.is_empty() {
         match update::apply(&cfg.update_base, client, c.as_mut().unwrap(), &plan, &mut |d, i, n, frac| {
             if frac <= 0.0 || frac >= 1.0 {
                 println!("  [{}/{}] {}", i + 1, n, d)
@@ -507,9 +510,10 @@ fn console_flow(cfg: &Config, client: &Path, self_updated: bool) {
         }) {
             Ok(rep) => {
                 println!(
-                    "合并完成：原地写 {} 条，追加 {} 条；pak {} → {} B",
+                    "合并完成：原地写 {} 条，追加 {} 条，删除 {} 条；pak {} → {} B",
                     rep.inplace.len(),
                     rep.appended.len(),
+                    rep.removed.len(),
                     rep.pak_old,
                     rep.pak_new
                 );

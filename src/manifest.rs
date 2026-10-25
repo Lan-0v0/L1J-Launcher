@@ -107,6 +107,14 @@ pub struct Manifest {
     /// 所以新清单推下去不会让老客户端解析失败。
     #[serde(default)]
     pub launcher: Option<Launcher>,
+    /// 要从 `Text.pak` 里**删除**的条目名
+    ///
+    /// 为什么不复用 `entries[].op:"delete"`：老登录器不认识这个 op，会走 replace
+    /// 分支，去下载服务端根本不存在的 `text/<name>`，404 会让整单更新失败。
+    /// 放在顶层新字段里，老登录器按未知字段忽略，完全无感 —— 这样新旧客户端
+    /// 可以共用同一份清单。
+    #[serde(default)]
+    pub text_deletes: Vec<String>,
     #[serde(default)]
     pub unsupported: Option<Unsupported>,
 }

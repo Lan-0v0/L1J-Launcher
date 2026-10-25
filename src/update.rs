@@ -49,6 +49,8 @@ pub struct Plan {
     pub to_download: Vec<Entry>,
     pub skipped: usize,
     pub files: FilePlan,
+    /// 要从 Text.pak 里删掉的条目名
+    pub to_remove: Vec<String>,
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -149,11 +151,23 @@ pub fn plan(m: &Manifest, c: Option<&Container>, client: &Path) -> Result<Plan, 
         }
     }
 
+    // Text 条目删除：只有本地确实存在才需要动手（删不到的忽略，保证幂等）
+    let mut to_remove: Vec<String> = Vec::new();
+    if !m.text_deletes.is_empty() {
+        let c = c.ok_or("清单含 text_deletes，但没有加载容器")?;
+        for name in &m.text_deletes {
+            if c.index_of(name).is_some() {
+                to_remove.push(name.clone());
+            }
+        }
+    }
+
     Ok(Plan {
         version: m.version.clone(),
         to_download,
         skipped,
         files,
+        to_remove,
     })
 }
 
@@ -379,12 +393,26 @@ pub fn apply(
     let _ = std::fs::copy(client.join("Text.idx"), bdir.join("Text.idx.bak"));
 
     progress("合并到 Text.pak", total, total, 1.0);
-    let mut rep = c.replace(&patches)?;
+    // 没有 replace 补丁时别白 clone 一遍 pak（几十 MB）
+    let mut rep = if patches.is_empty() {
+        l1pak::Report {
+            pak_old: c.pak.len(),
+            pak_new: c.pak.len(),
+            ..Default::default()
+        }
+    } else {
+        c.replace(&patches)?
+    };
     if !additions.is_empty() {
         let rep2 = c.add(&additions)?;
         rep.added = rep2.added;
         rep.pak_new = rep2.pak_new;
         rep.bytes_appended += rep2.bytes_appended;
+        rep.idx_changed = true;
+    }
+    if !plan.to_remove.is_empty() {
+        let rep3 = c.remove(&plan.to_remove)?;
+        rep.removed = rep3.removed;
         rep.idx_changed = true;
     }
     c.save(client)
@@ -457,12 +485,60 @@ mod tests {
             ],
             files: None,
             launcher: None,
+            text_deletes: vec![],
             unsupported: None,
         };
         let p = plan(&m, Some(&c), &dir).unwrap();
         assert_eq!(p.skipped, 1, "a.html 应命中本地");
         assert_eq!(p.to_download.len(), 1);
         assert_eq!(p.to_download[0].name, "b.html");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 造一个最小容器（条目按传入顺序写，不做名称排序）
+    fn tiny_container(items: &[(&str, &[u8])]) -> Container {
+        let mut pak = Vec::new();
+        let mut body = Vec::new();
+        for (name, data) in items {
+            let off = pak.len() as i32;
+            let enc = l1pak::cipher::encode(data);
+            pak.extend_from_slice(&enc);
+            let mut rec = [0u8; 28];
+            rec[0..4].copy_from_slice(&off.to_le_bytes());
+            rec[4..4 + name.len()].copy_from_slice(name.as_bytes());
+            rec[24..28].copy_from_slice(&(enc.len() as i32).to_le_bytes());
+            body.extend_from_slice(&rec);
+        }
+        let mut idx = Vec::new();
+        idx.extend_from_slice(&(items.len() as u32).to_le_bytes());
+        idx.extend_from_slice(&l1pak::cipher::encode(&body));
+        Container::from_parts(idx, pak).expect("造容器失败")
+    }
+
+    #[test]
+    fn plan_marks_text_deletes_only_when_present() {
+        let dir = std::env::temp_dir().join("l1launcher_textdel_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let c = tiny_container(&[("keep.html", b"K"), ("gone.html", b"G")]);
+        let m = Manifest {
+            schema: 1,
+            container: "Text".into(),
+            version: "vdel".into(),
+            created: None,
+            entries: vec![],
+            files: None,
+            launcher: None,
+            text_deletes: vec!["gone.html".into(), "never.html".into()],
+            unsupported: None,
+        };
+
+        let p = plan(&m, Some(&c), &dir).unwrap();
+        // 只有本地存在的才进待删列表；删不到的忽略，保证重复发同一份清单不报错
+        assert_eq!(p.to_remove, vec!["gone.html".to_string()]);
+        assert!(p.to_download.is_empty());
+        assert!(!p.to_remove.iter().any(|n| n == "keep.html"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -564,6 +640,7 @@ mod tests {
             entries: vec![],
             files: Some(files),
             launcher: None,
+            text_deletes: vec![],
             unsupported: None,
         };
         // 空容器：只要 entry 列表为空即可

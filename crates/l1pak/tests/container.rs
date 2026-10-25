@@ -98,3 +98,83 @@ fn save_and_reload() {
     assert_eq!(reloaded.plain_of("b.html").unwrap(), b"abc".to_vec());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn remove_drops_record_only_and_keeps_data_area() {
+    let a = b"<html>AAAA</html>";
+    let b = b"<html>BBBB</html>";
+    let d = b"<html>DDDD</html>";
+    let mut c = build_container(&[("a.html", a), ("b.html", b), ("d.html", d)]);
+
+    let before_pak = c.pak.clone();
+    let before_idx_len = c.idx_raw.len();
+
+    let rep = c.remove(&["b.html".to_string()]).expect("删除失败");
+
+    assert_eq!(rep.removed.len(), 1);
+    assert_eq!(rep.removed[0].0, "b.html");
+    // 关键：数据区一个字节都不能动（被删条目只留空洞，不搬移）
+    assert_eq!(c.pak, before_pak, "删除不应改动 Text.pak");
+    // idx 正好少一条记录
+    assert_eq!(c.idx_raw.len(), before_idx_len - 28, "idx 应少 28 字节");
+    assert_eq!(c.entries.len(), 2);
+    // 被删读不到，其余原样
+    assert!(c.plain_of("b.html").is_none(), "被删条目仍可读");
+    assert_eq!(c.plain_of("a.html").unwrap(), a);
+    assert_eq!(c.plain_of("d.html").unwrap(), d);
+
+    // 落盘结构自洽：用新 idx 重新解析仍成立
+    let reload = Container::from_parts(c.idx_raw.clone(), c.pak.clone()).expect("重新解析失败");
+    assert_eq!(reload.entries.len(), 2);
+    assert!(reload.plain_of("b.html").is_none());
+    assert_eq!(reload.plain_of("a.html").unwrap(), a);
+}
+
+#[test]
+fn remove_multiple_first_and_last() {
+    let mut c = build_container(&[
+        ("a.html", b"aaa"),
+        ("b.html", b"bbb"),
+        ("c.html", b"ccc"),
+        ("d.html", b"ddd"),
+    ]);
+    let rep = c
+        .remove(&["a.html".to_string(), "d.html".to_string()])
+        .expect("批量删除失败");
+
+    assert_eq!(rep.removed.len(), 2);
+    assert_eq!(c.entries.len(), 2);
+    assert_eq!(c.idx_raw.len(), 4 + 2 * 28, "idx 应剩两条记录");
+    assert!(c.plain_of("a.html").is_none());
+    assert!(c.plain_of("d.html").is_none());
+    assert_eq!(c.plain_of("b.html").unwrap(), b"bbb");
+    assert_eq!(c.plain_of("c.html").unwrap(), b"ccc");
+}
+
+#[test]
+fn remove_rejects_unknown_entry() {
+    let mut c = build_container(&[("a.html", b"aaa")]);
+    assert!(
+        c.remove(&["nope.html".to_string()]).is_err(),
+        "不存在的条目应当报错"
+    );
+    // 报错后容器状态不能被破坏
+    assert_eq!(c.entries.len(), 1);
+    assert_eq!(c.plain_of("a.html").unwrap(), b"aaa");
+}
+
+#[test]
+fn remove_then_add_keeps_container_consistent() {
+    let mut c = build_container(&[("a.html", b"AAA"), ("b.html", b"BBB")]);
+    c.remove(&["a.html".to_string()]).unwrap();
+
+    let mut add = BTreeMap::new();
+    add.insert("c.html".to_string(), b"CCC".to_vec());
+    c.add(&add).unwrap();
+
+    assert_eq!(c.entries.len(), 2);
+    assert!(c.plain_of("a.html").is_none());
+    assert_eq!(c.plain_of("b.html").unwrap(), b"BBB");
+    assert_eq!(c.plain_of("c.html").unwrap(), b"CCC");
+    assert_eq!(c.idx_raw.len(), 4 + 2 * 28);
+}
