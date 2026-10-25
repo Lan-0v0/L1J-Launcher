@@ -178,6 +178,8 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared, self_updated: bool) {
     };
     if plan.to_download.is_empty() && plan.files.is_empty() && plan.to_remove.is_empty() {
         let _ = update::write_local_version(&client, &plan.version, &[], &[]);
+        // 本地已经和清单一致 ⇒ 上次更新是成功的，遗留的备份可以清了
+        update::cleanup_backup(&client);
         set(Phase::Done, 1.0, 1.0, format!("已是最新（{}）", plan.version));
         return;
     }
@@ -568,6 +570,7 @@ fn console_flow(cfg: &Config, client: &Path, self_updated: bool) {
 
     let _ = update::write_local_version(client, &plan.version, &applied_text, &applied_files);
     if applied_text.is_empty() && applied_files.is_empty() {
+        update::cleanup_backup(client);
         println!("已是最新。");
     }
 }

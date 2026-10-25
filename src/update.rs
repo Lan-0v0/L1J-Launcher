@@ -386,8 +386,10 @@ pub fn apply(
         patches.insert(e.name.clone(), data);
     }
 
-    // 合并前备份上一版容器（单槽，失败可回滚）
-    let bdir = client.join("backup_l1j");
+    // 合并前备份上一版容器：只在本次更新窗口内存在。
+    // 失败（下面的 `?` 提前返回）时备份留着可供人工救援；
+    // 成功则立刻删掉 —— 玩家机器上不该常年压着 17MB。
+    let bdir = client.join(BACKUP_DIR);
     let _ = std::fs::create_dir_all(&bdir);
     let _ = std::fs::copy(client.join("Text.pak"), bdir.join("Text.pak.bak"));
     let _ = std::fs::copy(client.join("Text.idx"), bdir.join("Text.idx.bak"));
@@ -415,9 +417,61 @@ pub fn apply(
         rep.removed = rep3.removed;
         rep.idx_changed = true;
     }
-    c.save(client)
-        .map_err(|e| format!("保存容器失败: {}", e))?;
+    if let Err(e) = c.save(client) {
+        // 保留备份，玩家可以手工把 Text.pak.bak / Text.idx.bak 覆盖回去
+        return Err(format!("保存容器失败: {}", e));
+    }
+
+    let _ = std::fs::remove_file(bdir.join("Text.pak.bak"));
+    let _ = std::fs::remove_file(bdir.join("Text.idx.bak"));
+    let _ = std::fs::remove_dir(&bdir); // 目录空了才成功，非空忽略
     Ok(rep)
+}
+
+/// 只保留最近一次的文件备份，别让版本目录越堆越多
+fn prune_file_backups(root: &Path) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let t = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        dirs.push((t, p));
+    }
+    if dirs.len() <= 1 {
+        return;
+    }
+    dirs.sort_by(|a, b| b.0.cmp(&a.0)); // 新的在前
+    for (_, p) in dirs.into_iter().skip(1) {
+        let _ = std::fs::remove_dir_all(&p);
+    }
+}
+
+/// 清理更新遗留的备份目录
+///
+/// 只在「本地已经和清单一致」时调用 —— 那种状态下上次更新必然是成功的，
+/// 留着备份没有意义。这样即使某个玩家的更新中途失败留下了残留，
+/// 下次成功启动也会自动扫干净。
+pub fn cleanup_backup(client: &Path) {
+    let root = client.join(BACKUP_DIR);
+    if !root.is_dir() {
+        return;
+    }
+    for n in ["Text.pak.bak", "Text.idx.bak"] {
+        let _ = std::fs::remove_file(root.join(n));
+    }
+    let ffiles = root.join("files");
+    prune_file_backups(&ffiles);
+    // 目录空了（没有文件备份）就一并删掉
+    let _ = std::fs::remove_dir(&ffiles);
+    let _ = std::fs::remove_dir(&root);
 }
 
 /// 条目名一般只含 ASCII，但稳妥起见做最小转义
@@ -539,6 +593,27 @@ mod tests {
         assert_eq!(p.to_remove, vec!["gone.html".to_string()]);
         assert!(p.to_download.is_empty());
         assert!(!p.to_remove.iter().any(|n| n == "keep.html"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_backup_removes_text_and_prunes_file_versions() {
+        let dir = std::env::temp_dir().join("l1launcher_cleanup_backup_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join(BACKUP_DIR);
+        std::fs::create_dir_all(root.join("files").join("v1")).unwrap();
+        std::fs::create_dir_all(root.join("files").join("v2")).unwrap();
+        std::fs::write(root.join("Text.pak.bak"), b"x").unwrap();
+        std::fs::write(root.join("Text.idx.bak"), b"y").unwrap();
+        std::fs::write(root.join("files").join("v1/a.txt"), b"1").unwrap();
+        std::fs::write(root.join("files").join("v2/a.txt"), b"2").unwrap();
+
+        cleanup_backup(&dir);
+
+        assert!(!root.join("Text.pak.bak").exists(), "容器备份应被清掉");
+        assert!(!root.join("Text.idx.bak").exists(), "索引备份应被清掉");
+        let remain = std::fs::read_dir(root.join("files")).unwrap().count();
+        assert_eq!(remain, 1, "文件备份只应保留一个版本目录");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -840,6 +915,8 @@ pub fn apply_files(
         serde_json::to_string_pretty(&meta).unwrap_or_default(),
     );
     report.backup = Some(bdir.to_string_lossy().to_string());
+    // 只留最近一次的文件备份（本次刚建，mtime 最新），避免版本目录越堆越多
+    prune_file_backups(&client.join(BACKUP_DIR).join("files"));
     Ok(report)
 }
 
