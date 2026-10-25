@@ -24,6 +24,9 @@
 //!
 //! 两步都在同一目录（同卷）做 rename，第二步失败立刻反向改名回滚。
 //! 这是 Squirrel.Windows / Velopack / iw4x 登录器共用的机制。
+//!
+//! `.old` 只是改名的副产品，不是长期备份：新版本成功启动后会自动删掉
+//! （见 [`cleanup_old`]），所以客户端目录里不会积累垃圾。
 
 use crate::http;
 use crate::manifest::Launcher;
@@ -58,6 +61,31 @@ pub fn own_exe() -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| format!("取自身路径失败: {}", e))
 }
 
+/// 清理上一版留档（`<exe>.old`）
+///
+/// **为什么可以删**：能调用到这里，说明当前 exe 已经成功加载并跑起来了；
+/// 而新文件落地前已经过 size + sha256 + PE 三重校验，坏文件根本写不进去。
+/// 所以 `.old` 没有救场价值，留着只是白占 2.8MB。
+///
+/// 真要回滚，走清单更可靠：把 `launcher.sha256` 指回旧版，玩家下次启动就换回去了。
+///
+/// 删不掉不算错误：旧进程可能还没完全退出（文件仍被映射），下次启动会再试。
+pub fn cleanup_old(exe: &Path) -> bool {
+    let mut name = match exe.file_name() {
+        Some(s) => s.to_os_string(),
+        None => return false,
+    };
+    name.push(OLD_SUFFIX);
+    let old = match exe.parent() {
+        Some(d) => d.join(name),
+        None => return false,
+    };
+    if !old.is_file() {
+        return false;
+    }
+    std::fs::remove_file(&old).is_ok()
+}
+
 /// 自身是否需要更新（先比大小，快速路径；大小一致再算 sha256）
 fn needs_update(exe: &Path, want: &Launcher) -> Result<bool, String> {
     let meta = std::fs::metadata(exe).map_err(|e| format!("读自身属性失败: {}", e))?;
@@ -81,6 +109,12 @@ pub fn run(
     suppressed: bool,
     progress: &mut dyn FnMut(f32),
 ) -> Outcome {
+    // 能执行到这里，就说明当前 exe 是活的、能加载 —— 上一版的留档没用了，顺手清掉。
+    // 新版本若真的起不来，进程根本走不到这一行，`.old` 会留着当救命文件。
+    if let Ok(exe) = own_exe() {
+        let _ = cleanup_old(&exe);
+    }
+
     let want = match launcher {
         Some(v) => v,
         None => return Outcome::UpToDate,
@@ -308,5 +342,27 @@ mod tests {
 
         // 半截文件
         assert!(!is_pe(&[b'M', b'Z']));
+    }
+
+    #[test]
+    fn cleanup_old_removes_only_the_archive() {
+        let dir = std::env::temp_dir().join("l1j_selfupdate_cleanup_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let exe = dir.join("Login.exe");
+        let old = dir.join("Login.exe.old");
+        std::fs::write(&exe, b"MZ-exe").unwrap();
+        std::fs::write(&old, b"old-version").unwrap();
+
+        assert!(cleanup_old(&exe), "存在 .old 时应删掉");
+        assert!(!old.exists(), ".old 应被删除");
+        assert!(exe.exists(), "本体绝不能被删");
+
+        // 没有 .old 时返回 false，不报错也不动本体
+        assert!(!cleanup_old(&exe));
+        assert!(exe.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
