@@ -456,6 +456,7 @@ mod tests {
                 },
             ],
             files: None,
+            launcher: None,
             unsupported: None,
         };
         let p = plan(&m, Some(&c), &dir).unwrap();
@@ -562,6 +563,7 @@ mod tests {
             created: None,
             entries: vec![],
             files: Some(files),
+            launcher: None,
             unsupported: None,
         };
         // 空容器：只要 entry 列表为空即可

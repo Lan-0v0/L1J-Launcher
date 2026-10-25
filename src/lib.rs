@@ -13,6 +13,7 @@ pub mod elevate;
 pub mod http;
 pub mod launch;
 pub mod manifest;
+pub mod selfupdate;
 pub mod update;
 #[cfg(windows)]
 pub mod select;

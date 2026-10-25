@@ -4,15 +4,21 @@
 //! 默认：原生更新窗口（与客户端 `skin\Bulletin.bmp` 同款）
 //! `--console`：控制台模式（自测/排错）
 
-use l1j_launcher::{config::Config, launch, update};
+use l1j_launcher::{config::Config, launch, selfupdate, update};
 #[cfg(windows)]
 use l1j_launcher::ui::{self, Phase, UiState};
 use l1pak::Container;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    // 决策：与同行一致——启动即提权，只弹一次 UAC（后续如要改回最小权限，删掉这行即可）
-    l1j_launcher::elevate::ensure_admin();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let console_mode = args.iter().any(|a| a == "--console");
+    // 决策：与同行一致——正常启动即提权，只弹一次 UAC。
+    // console 是排错模式，不提权：否则每次调试都要点一次 UAC，
+    // 而且提权后输出会跟着新进程走掉，反而看不到日志。
+    if !console_mode {
+        l1j_launcher::elevate::ensure_admin();
+    }
     let exe = std::env::current_exe().unwrap_or_else(|e| {
         eprintln!("取程序路径失败: {}", e);
         std::process::exit(1)
@@ -33,9 +39,12 @@ fn main() {
     });
     let client = cfg.client_path(&dir);
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--console") {
-        console_flow(&cfg, &client);
+    // 刚自更新过：本轮不再碰 exe。
+    // 这是防死循环的关键——即使改名被安全软件回滚，也只会在每次启动尝试一次，
+    // 不会出现"更新不成功 → 重启 → 又更新"的循环。
+    let self_updated = args.iter().any(|a| a == "--self-updated");
+    if console_mode {
+        console_flow(&cfg, &client, self_updated);
         return;
     }
 
@@ -45,7 +54,7 @@ fn main() {
         let st = state.clone();
         let cfg2 = cfg.clone();
         let client2 = client.clone();
-        std::thread::spawn(move || worker(cfg2, client2, st));
+        std::thread::spawn(move || worker(cfg2, client2, st, self_updated));
         // 主循环：加载窗 → 开始 → 选区窗；选区点「取消」回到加载窗，X / 启动成功则退出
         loop {
             ui::reset_flags();
@@ -65,11 +74,11 @@ fn main() {
         }
     }
     #[cfg(not(windows))]
-    console_flow(&cfg, &client);
+    console_flow(&cfg, &client, self_updated);
 }
 
 #[cfg(windows)]
-fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
+fn worker(cfg: Config, client: PathBuf, state: ui::Shared, self_updated: bool) {
     // 只设「目标值」，绘制值由 ui 的 33ms 定时器缓动追上去（这就是进度条动画）
     let set = |phase: Phase, cur: f32, ovr: f32, msg: String| {
         {
@@ -94,6 +103,44 @@ fn worker(cfg: Config, client: PathBuf, state: ui::Shared) {
             return;
         }
     };
+
+    // ---- 登录器自更新 ----
+    // 必须排在 Text / files 通道之前：成功就立即重启，让新版登录器从头跑完整流程，
+    // 不存在"更新做到一半换了程序"的中间态。
+    match selfupdate::run(
+        &cfg.update_base,
+        manifest.launcher.as_ref(),
+        self_updated,
+        &mut |frac| {
+            set(
+                Phase::Working,
+                frac,
+                0.0,
+                format!("正在更新登录器… {:.0}%", frac * 100.0),
+            );
+        },
+    ) {
+        selfupdate::Outcome::UpToDate => {}
+        selfupdate::Outcome::Failed(e) => {
+            // fail-open：自更新失败绝不能挡住玩家进游戏
+            log_line(&format!("[自更新] 失败（已忽略）: {}", e));
+        }
+        selfupdate::Outcome::Replaced { version } => {
+            set(
+                Phase::Working,
+                1.0,
+                1.0,
+                format!("登录器已更新到 {}，正在重启…", version),
+            );
+            // 留一帧时间把提示画出来（UI 是 33ms 缓动）
+            std::thread::sleep(std::time::Duration::from_millis(450));
+            match selfupdate::restart_self() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => log_line(&format!("[自更新] 重启失败，请手动重开: {}", e)),
+            }
+        }
+    }
+
     let files_cfg = manifest.files.clone().unwrap_or_default();
     let has_text = !manifest.entries.is_empty();
     let has_files = !files_cfg.is_empty();
@@ -257,18 +304,18 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
             let src = client.join("servers.ini");
             if src.is_file() {
                 match std::fs::copy(&src, client.join(&ini)) {
-                    Ok(_) => sel_log(&format!("已写 {}（来自 servers.ini）", ini)),
-                    Err(e) => sel_log(&format!("复制 servers.ini 失败: {}", e)),
+                    Ok(_) => log_line(&format!("已写 {}（来自 servers.ini）", ini)),
+                    Err(e) => log_line(&format!("复制 servers.ini 失败: {}", e)),
                 }
             } else {
-                sel_log("缺少 servers.ini");
+                log_line("缺少 servers.ini");
             }
             return launch::launch_game(client, &cfg.game_exe);
         }
         if cfg.dev_skip_select {
             let pick = cfg.servers.iter().position(|x| x.enabled).unwrap_or(0);
             let sv = &cfg.servers[pick];
-            sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
+            log_line(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
 
             l1j_launcher::launch::set_real_server(&format!("{}:{}", sv.ip, sv.port.unwrap_or(2000)));
             if let Some(blob) = sv.server_data.as_deref() {
@@ -277,7 +324,7 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                 } else {
                     format!("{}.ini", std::path::Path::new(&cfg.game_exe).file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default())
                 };
-                sel_log(&format!("写 {}: {:?}", ini, l1j_launcher::launch::write_server_data(client, &ini, blob)));
+                log_line(&format!("写 {}: {:?}", ini, l1j_launcher::launch::write_server_data(client, &ini, blob)));
             }
             return match cfg.launch_arg.as_deref() {
                 Some(a) if !a.trim().is_empty() => {
@@ -301,7 +348,7 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
             return match l1j_launcher::select::select(list) {
                 Some(i) => {
                     let sv = &cfg.servers[i];
-                    sel_log(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
+                    log_line(&format!("选中: {} ip={} port={:?}", sv.name, sv.ip, sv.port));
                     launch::set_click_index(i);
                     {
                         let ini = if cfg.game_exe.to_lowercase().ends_with(".bin") { "Login.ini".to_string() }
@@ -318,7 +365,7 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                             if let Some(&st) = starts.get(i) {
                                 let end = starts.get(i + 1).copied().unwrap_or(tpl.len());
                                 let _ = std::fs::write(client.join(&ini), &tpl[st..end]);
-                                sel_log(&format!("已写 {}（仅第 {} 区）", ini, i + 1));
+                                log_line(&format!("已写 {}（仅第 {} 区）", ini, i + 1));
                             }
                         }
                     }
@@ -330,7 +377,7 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
                 } else {
                     format!("{}.ini", std::path::Path::new(&cfg.game_exe).file_stem().map(|v| v.to_string_lossy().to_string()).unwrap_or_default())
                 };
-                        sel_log(&format!("写 {}: {:?}", ini, launch::write_server_data(client, &ini, blob)));
+                        log_line(&format!("写 {}: {:?}", ini, launch::write_server_data(client, &ini, blob)));
                     }
                     launch::launch_game_with_ip(client, &cfg.game_exe, &sv.ip)
                 }
@@ -346,11 +393,11 @@ fn do_launch(cfg: &Config, client: &Path) -> Result<(), String> {
     }
 }
 
-/// 选区写入日志（GUI 程序 eprintln 不可见，必须落盘）
-fn sel_log(msg: &str) {
+/// 运行日志（GUI 程序 eprintln 不可见，必须落盘）
+fn log_line(msg: &str) {
     use std::io::Write;
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
-        .open("D://l1log//sel_log.txt") {
+        .open("D://l1log//log_line.txt") {
         let _ = writeln!(f, "[{}] {}", chrono_now(), msg);
     }
 }
@@ -374,7 +421,7 @@ fn trim(s: &str, n: usize) -> String {
     out.replace('\n', " ")
 }
 
-fn console_flow(cfg: &Config, client: &Path) {
+fn console_flow(cfg: &Config, client: &Path, self_updated: bool) {
     use std::io::Write as _;
     let manifest = match update::fetch_and_verify(&cfg.update_base, &cfg.public_key) {
         Ok(m) => m,
@@ -386,6 +433,24 @@ fn console_flow(cfg: &Config, client: &Path) {
             return;
         }
     };
+    // ---- 登录器自更新（console 模式只提示，不重启）----
+    match selfupdate::run(
+        &cfg.update_base,
+        manifest.launcher.as_ref(),
+        self_updated,
+        &mut |frac| {
+            print!("\r  [登录器] {:.0}%   ", frac * 100.0);
+            let _ = std::io::stdout().flush();
+        },
+    ) {
+        selfupdate::Outcome::Replaced { version } => {
+            println!("\n登录器已更新到 {}，请重新运行。", version);
+            return;
+        }
+        selfupdate::Outcome::Failed(e) => println!("[登录器] 自更新失败（已忽略）: {}", e),
+        selfupdate::Outcome::UpToDate => println!("[登录器] 已是最新"),
+    }
+
     println!(
         "本地版本: {:?}   远端: {}",
         update::read_local_version(client).map(|v| v.version),

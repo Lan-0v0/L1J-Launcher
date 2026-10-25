@@ -10,14 +10,15 @@
 
 ---
 
-## 两条更新通道
+## 三条更新通道
 
 | 通道 | 目标 | 能力 |
 |---|---|---|
 | **Text** | `Text.pak` 内部条目（NPC 对话页、字符串表） | 改已有条目、**新增条目**（新记录按名称小写序插入 idx，保持客户端二分查找可用） |
 | **文件** | 客户端目录内**任意文件**（反外挂组件、补丁 DLL、配置） | 新建 / 覆盖 / 删除；内容寻址下载、路径白名单、占用检测、原子替换、备份回滚 |
+| **登录器自身** | 正在运行的这个 exe | 改名腾位替换（见「登录器自更新」）；失败一律放行，不影响进游戏 |
 
-清单为 `schema 2`。**老清单没有 `files` 段时，行为与旧版完全一致**（已实测）。
+清单为 `schema 2`。**老清单没有 `files` / `launcher` 段时，行为与旧版完全一致**（已实测）。
 
 ### 清单结构
 
@@ -33,6 +34,7 @@
     "entries": [ { "path": "antibot/ac.dll", "size": 12345, "sha256": "..." } ],
     "deletes": [ "antibot/old.dll" ]
   },
+  "launcher": { "version": "20261025.1840", "size": 2800640, "sha256": "..." },
   "unsupported": { "added": [], "removed": [] }
 }
 ```
@@ -40,6 +42,8 @@
 - `entries[].op`：缺省 = 覆盖已有条目，`add` = 新增（客户端容器里没有时走 add 分支）
 - `files[].path`：**相对客户端目录**的路径，正斜杠
 - 文件下载地址 = `<update_base><files.base><sha256>`（内容寻址，与路径无关，天然去重）
+- `launcher`：登录器自身，**故意不含文件名**（玩家会把 exe 改名），更新目标一律取 `current_exe()`；
+  是否更新**只比 `sha256`**，`version` 仅用于日志和界面提示
 
 ---
 
@@ -64,6 +68,36 @@
 
 **回滚**：`rollback_files()` 取最新版本备份目录按 `_files.json` 回放（原本存在的拷回，本次新建的删掉）；
 容器仍走 `backup_l1j/Text.pak.bak` / `Text.idx.bak`。
+
+---
+
+## 登录器自更新
+
+Windows 只锁运行中 exe 的**映像节**，不锁**目录项**：可以改名，但不能覆盖或删除。
+所以自更新用「改名腾位」，与 Squirrel.Windows / Velopack / iw4x 登录器同一套机制：
+
+```
+下载 files/<sha256> → 校验 size + sha256 + PE 头 → 写同目录 <exe>.new
+  → <exe> 改名为 <exe>.old   （腾出原名）
+  → <exe>.new 改名为 <exe>   （就位；这一步失败立刻把 .old 改回）
+  → 重启自己，带 --self-updated
+```
+
+**为什么不复用文件通道**：`apply_files` 对 `is_locked()` 命中是直接报错，而正在运行的自己永远被锁，
+会把整单更新拖失败。自更新必须是独立分支（`src/selfupdate.rs`）。
+
+**五条防护**
+
+| 防护 | 做法 |
+|---|---|
+| 防重复 | 比 `sha256`，相等即跳过（顺带自愈被玩家改过的 exe） |
+| 防死循环 | 重启带 `--self-updated`，本次启动一律不再碰 exe；即使被回滚也只尝试一次 |
+| 防脏数据 | size + sha256 + `MZ` / `PE\0\0` 双头校验，全过才写 `.new` |
+| 防半途失败 | 第二步失败立刻反向改名回滚，`.old` 始终是可直接运行的完整上一版 |
+| 防阻断 | 任何异常只记日志，**继续正常更新与启动**（fail-open） |
+
+`.old` 不自动删：它是手工回滚点（`copy /y Login.exe.old Login.exe` 即可回到上一版），
+下次更新时被新的 `.old` 覆盖。
 
 ---
 
@@ -157,11 +191,20 @@ l1sign sign release\vXXX\manifest.json priv.hex
 :: ④ 上传 manifest.json / manifest.sig / text\ / files\
 ```
 
+要顺带更新**登录器本身**时，把新 exe 放到 `files/<它的 sha256>`，并在清单里加：
+
+```json
+"launcher": { "version": "20261025.1840", "size": 2800640, "sha256": "<与上面的文件名一致>" }
+```
+
+玩家下次启动就会自己换掉，旧版留成 `Login.exe.old`，可手工回滚。
+
 ## 命令行
 
 ```bat
-Login.exe            直接进图形界面（更新 → 选区 → 游戏）
-Login.exe --console  控制台模式：只跑更新并打印明细（自测/排错）
+Login.exe                 直接进图形界面（更新 → 选区 → 游戏）
+Login.exe --console       控制台模式：只跑更新并打印明细（自测/排错；不提权、不重启）
+Login.exe --self-updated  内部使用：刚自更新完，本次不再碰 exe（防死循环）
 l1sign keygen priv.hex pub.hex
 l1sign sign   manifest.json priv.hex
 l1sign verify manifest.json pub.hex

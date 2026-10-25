@@ -65,6 +65,21 @@ impl Files {
     }
 }
 
+/// 登录器自身（可选段）
+///
+/// 只给 `size` / `sha256`，**不含文件名**：玩家会把 exe 改名，更新目标一律取
+/// `current_exe()` 的文件名，避免去覆盖一个不存在的固定名字。
+///
+/// 是否更新**不看 version**（版本号靠人维护，早晚会忘），而是比 sha256。
+/// version 只用于日志和界面提示。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Launcher {
+    #[serde(default)]
+    pub version: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Unsupported {
     #[serde(default)]
@@ -86,6 +101,12 @@ pub struct Manifest {
     /// 文件通道（可缺省；老清单没有这一段，行为与以前完全一致）
     #[serde(default)]
     pub files: Option<Files>,
+    /// 登录器自身（可缺省）
+    ///
+    /// 兼容性：老登录器的 `Manifest` 没有这个字段，serde 默认忽略未知字段，
+    /// 所以新清单推下去不会让老客户端解析失败。
+    #[serde(default)]
+    pub launcher: Option<Launcher>,
     #[serde(default)]
     pub unsupported: Option<Unsupported>,
 }
