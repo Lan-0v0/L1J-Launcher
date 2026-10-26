@@ -418,7 +418,13 @@ pub fn apply(
         rep.idx_changed = true;
     }
     if let Err(e) = c.save(client) {
-        // 保留备份，玩家可以手工把 Text.pak.bak / Text.idx.bak 覆盖回去
+        // 半截 .tmp_new 由 save() 自己清。这里再判断容器到底有没有被改动：
+        // 没改动的话备份没有任何救援价值，留着就是 17MB 垃圾（游戏占用时必然走到这条）。
+        if container_unchanged(client, &bdir) {
+            let _ = std::fs::remove_file(bdir.join("Text.pak.bak"));
+            let _ = std::fs::remove_file(bdir.join("Text.idx.bak"));
+            let _ = std::fs::remove_dir(&bdir);
+        }
         return Err(format!("保存容器失败: {}", e));
     }
 
@@ -428,50 +434,39 @@ pub fn apply(
     Ok(rep)
 }
 
-/// 只保留最近一次的文件备份，别让版本目录越堆越多
-fn prune_file_backups(root: &Path) {
-    let Ok(rd) = std::fs::read_dir(root) else {
-        return;
-    };
-    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
-    for e in rd.flatten() {
-        let p = e.path();
-        if !p.is_dir() {
-            continue;
+/// 保存失败后判断容器是否真的没被改动（决定备份还有没有保留价值）
+///
+/// rename 是原子的，所以正常情况下失败发生在改名之前，原文件一个字节没动；
+/// 只有「pak 改名成功、idx 改名失败」这一种极端情况才会真的改到容器，
+/// 那时必须把备份留给玩家手工还原。
+fn container_unchanged(client: &Path, bdir: &Path) -> bool {
+    for name in ["Text.pak", "Text.idx"] {
+        let cur = match std::fs::read(client.join(name)) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let bak = match std::fs::read(bdir.join(format!("{}.bak", name))) {
+            Ok(v) => v,
+            Err(_) => return false, // 备份不完整，别乱删
+        };
+        if l1pak::Container::sha256_hex(&cur) != l1pak::Container::sha256_hex(&bak) {
+            return false;
         }
-        let t = e
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        dirs.push((t, p));
     }
-    if dirs.len() <= 1 {
-        return;
-    }
-    dirs.sort_by(|a, b| b.0.cmp(&a.0)); // 新的在前
-    for (_, p) in dirs.into_iter().skip(1) {
-        let _ = std::fs::remove_dir_all(&p);
-    }
+    true
 }
 
 /// 清理更新遗留的备份目录
 ///
 /// 只在「本地已经和清单一致」时调用 —— 那种状态下上次更新必然是成功的，
-/// 留着备份没有意义。这样即使某个玩家的更新中途失败留下了残留，
-/// 下次成功启动也会自动扫干净。
+/// 备份没有任何存在价值，整个 `backup_l1j/` 直接删掉。
+/// 这样即使某个玩家的更新中途失败留下了残留，下次成功启动也会自动扫干净。
 pub fn cleanup_backup(client: &Path) {
     let root = client.join(BACKUP_DIR);
     if !root.is_dir() {
         return;
     }
-    for n in ["Text.pak.bak", "Text.idx.bak"] {
-        let _ = std::fs::remove_file(root.join(n));
-    }
-    let ffiles = root.join("files");
-    prune_file_backups(&ffiles);
-    // 目录空了（没有文件备份）就一并删掉
-    let _ = std::fs::remove_dir(&ffiles);
-    let _ = std::fs::remove_dir(&root);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// 条目名一般只含 ASCII，但稳妥起见做最小转义
@@ -597,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_backup_removes_text_and_prunes_file_versions() {
+    fn cleanup_backup_removes_whole_dir() {
         let dir = std::env::temp_dir().join("l1launcher_cleanup_backup_test");
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join(BACKUP_DIR);
@@ -610,10 +605,7 @@ mod tests {
 
         cleanup_backup(&dir);
 
-        assert!(!root.join("Text.pak.bak").exists(), "容器备份应被清掉");
-        assert!(!root.join("Text.idx.bak").exists(), "索引备份应被清掉");
-        let remain = std::fs::read_dir(root.join("files")).unwrap().count();
-        assert_eq!(remain, 1, "文件备份只应保留一个版本目录");
+        assert!(!root.exists(), "backup_l1j 整个目录都应被删掉");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -915,8 +907,12 @@ pub fn apply_files(
         serde_json::to_string_pretty(&meta).unwrap_or_default(),
     );
     report.backup = Some(bdir.to_string_lossy().to_string());
-    // 只留最近一次的文件备份（本次刚建，mtime 最新），避免版本目录越堆越多
-    prune_file_backups(&client.join(BACKUP_DIR).join("files"));
+    // 与容器备份一致：成功即清，游戏目录里不留任何备份。
+    // 失败路径都在上面的 `?` / `return Err` 提前返回，走不到这里，备份会留着救人。
+    let _ = std::fs::remove_dir_all(&bdir);
+    let ffiles = client.join(BACKUP_DIR).join("files");
+    let _ = std::fs::remove_dir(&ffiles);
+    let _ = std::fs::remove_dir(&client.join(BACKUP_DIR));
     Ok(report)
 }
 

@@ -429,16 +429,26 @@ impl Container {
     }
 
     /// 原子写回（先写 .tmp 再 rename）
+    ///
+    /// 任何一步失败都要把半截的 `.tmp_new` 清掉：客户端目录一旦被游戏占用，
+    /// 写盘几乎必然失败，而一个 Text.pak.tmp_new 就是 17MB 垃圾。
     pub fn save(&self, client_dir: &Path) -> std::io::Result<()> {
         let pak_path: PathBuf = client_dir.join("Text.pak");
         let idx_path: PathBuf = client_dir.join("Text.idx");
         let tmp_pak = pak_path.with_extension("pak.tmp_new");
         let tmp_idx = idx_path.with_extension("idx.tmp_new");
-        fs::write(&tmp_pak, &self.pak)?;
-        fs::write(&tmp_idx, &self.idx_raw)?;
-        fs::rename(&tmp_pak, &pak_path)?;
-        fs::rename(&tmp_idx, &idx_path)?;
-        Ok(())
+        let res = (|| -> std::io::Result<()> {
+            fs::write(&tmp_pak, &self.pak)?;
+            fs::write(&tmp_idx, &self.idx_raw)?;
+            fs::rename(&tmp_pak, &pak_path)?;
+            fs::rename(&tmp_idx, &idx_path)?;
+            Ok(())
+        })();
+        if res.is_err() {
+            let _ = fs::remove_file(&tmp_pak);
+            let _ = fs::remove_file(&tmp_idx);
+        }
+        res
     }
 
     pub fn sha256_hex(data: &[u8]) -> String {

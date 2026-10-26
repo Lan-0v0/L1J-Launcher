@@ -178,3 +178,24 @@ fn remove_then_add_keeps_container_consistent() {
     assert_eq!(c.plain_of("c.html").unwrap(), b"CCC");
     assert_eq!(c.idx_raw.len(), 4 + 2 * 28);
 }
+
+#[test]
+fn save_failure_cleans_tmp_files() {
+    // 目标路径是个目录 -> rename 必然失败；失败后不允许留下 .tmp_new
+    let dir = std::env::temp_dir().join("l1pak_test_save_fail");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Text.pak")).unwrap();
+
+    let c = build_container(&[("a.html", b"0123456789")]);
+    assert!(c.save(&dir).is_err(), "保存应当失败");
+
+    assert!(
+        !dir.join("Text.pak.tmp_new").exists(),
+        "失败后 Text.pak.tmp_new 必须被清理（否则每次失败留 17MB 垃圾）"
+    );
+    assert!(
+        !dir.join("Text.idx.tmp_new").exists(),
+        "失败后 Text.idx.tmp_new 必须被清理"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
