@@ -212,6 +212,7 @@ l1eat file pack --src 要发布的目录 --release release\vXXX [--prefix antibo
 l1sign sign release\vXXX\manifest.json priv.hex
 
 :: ④ 上传 manifest.json / manifest.sig / text\ / files\
+:: ⑤ 清理 files\：只留「当前版 + 上一版 + 清单引用的资源」（见下节）
 ```
 
 要顺带更新**登录器本身**时，把新 exe 放到 `files/<它的 sha256>`，并在清单里加：
@@ -220,7 +221,37 @@ l1sign sign release\vXXX\manifest.json priv.hex
 "launcher": { "version": "20261025.1840", "size": 2800640, "sha256": "<与上面的文件名一致>" }
 ```
 
-玩家下次启动就会自己换掉，旧版留成 `Login.exe.old`，可手工回滚。
+玩家下次启动就会自己换掉。换的那一刻会产生 `Login.exe.old`，但**新版成功启动后会自动删除**，
+所以客户端的 `.old` 不常驻（只有新版本起不来时它才会留下，那时正好是救命文件）。
+
+### files\ 目录保留策略（每次发版后必须做）
+
+`files/` 是内容寻址的：换一个版本就多一个 2.8MB 的 exe，旧版**不会**自动消失。
+**只保留 3 类，其余全删**：
+
+| 保留 | 为什么 |
+|---|---|
+| 当前 `launcher.sha256` 指向的 exe | 正在用的版本 |
+| **上一版** exe | 唯一的手工回滚点（改清单指回去即可） |
+| 清单 `files.entries[].sha256` 列出的每个资源 | 删了会让玩家的文件通道 404 |
+
+```bash
+cd /opt/l1j/update/files
+
+# ① 现状 + 清单引用，两者求差集才知道该删谁
+find . -maxdepth 1 -type f -printf '%s %f\n'
+curl -s http://<host>:1999/manifest.json | grep -o '"sha256": *"[0-9a-f]*"'
+
+# ② 删前校验内容寻址完整性：文件名必须等于自身 sha256
+for f in *; do [ "$(sha256sum "$f" | cut -d' ' -f1)" = "$f" ] || echo "BAD $f"; done
+
+# ③ 删除差集里的文件（逐个写全名，不要通配符）
+rm -f <旧版哈希> ...
+
+# ④ 复核：当前版 / 上一版 / 资源 全部 200，被删的 404
+```
+
+2026-10-26 实测：7 项 19MB → 3 项 5.4MB。
 
 ## 命令行
 
